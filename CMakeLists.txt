@@ -23,6 +23,15 @@ set(STB_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/stb" CACHE PATH "Path 
 # Build options
 option(BUILD_EXAMPLES "Build example applications" OFF)
 
+# GPU architectures to compile for
+set(HIP_ARCHITECTURES "" CACHE STRING "GPU architectures to compile for (semicolon-separated)")
+if(NOT HIP_ARCHITECTURES)
+    set(HIP_ARCHITECTURES "gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201")
+    message(STATUS "Using default HIP architectures: ${HIP_ARCHITECTURES}")
+else()
+    message(STATUS "Using custom HIP architectures: ${HIP_ARCHITECTURES}")
+endif()
+
 # Library
 add_library(hip_demand_texture
     src/DemandTextureLoader.cpp
@@ -52,7 +61,7 @@ if(BUILD_EXAMPLES)
     hip_add_executable(
         TARGET render_kernel
         SOURCES examples/simple_render_kernel.hip
-        ARCHITECTURES gfx1030 gfx1100
+        ARCHITECTURES ${HIP_ARCHITECTURES}
         OPTIONS -O3 --std=c++17
         INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
