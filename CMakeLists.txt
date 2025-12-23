@@ -20,6 +20,9 @@ find_package(HIP REQUIRED)
 # You can download from: https://github.com/nothings/stb
 set(STB_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/stb" CACHE PATH "Path to stb headers")
 
+# Build options
+option(BUILD_EXAMPLES "Build example applications" OFF)
+
 # Library
 add_library(hip_demand_texture
     src/DemandTextureLoader.cpp
@@ -43,42 +46,45 @@ target_link_libraries(hip_demand_texture
 
 target_compile_definitions(hip_demand_texture PRIVATE __HIP_PLATFORM_AMD__)
 
-# Compile HIP kernel to code object
-hip_add_executable(
-    TARGET render_kernel
-    SOURCES examples/simple_render_kernel.hip
-    ARCHITECTURES gfx1030 gfx1100
-    OPTIONS -O3 --std=c++17
-    INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
+# Examples (optional)
+if(BUILD_EXAMPLES)
+    # Compile HIP kernel to code object
+    hip_add_executable(
+        TARGET render_kernel
+        SOURCES examples/simple_render_kernel.hip
+        ARCHITECTURES gfx1030 gfx1100
+        OPTIONS -O3 --std=c++17
+        INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
 
-# Example application (host code only)
-add_executable(texture_loader_example
-    examples/simple_render.cpp
-)
+    # Example application (host code only)
+    add_executable(texture_loader_example
+        examples/simple_render.cpp
+    )
 
-target_include_directories(texture_loader_example
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${STB_INCLUDE_DIR}
-)
+    target_include_directories(texture_loader_example
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${STB_INCLUDE_DIR}
+    )
 
-target_link_libraries(texture_loader_example
-    PRIVATE
-        hip_demand_texture
-)
-target_compile_definitions(texture_loader_example PRIVATE __HIP_PLATFORM_AMD__)
+    target_link_libraries(texture_loader_example
+        PRIVATE
+            hip_demand_texture
+    )
+    target_compile_definitions(texture_loader_example PRIVATE __HIP_PLATFORM_AMD__)
 
-# Copy kernel code object to output directory
-add_custom_command(TARGET texture_loader_example POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_PROPERTY:render_kernel,HIP_CODE_OBJECT>
-        $<TARGET_FILE_DIR:texture_loader_example>/render_kernel.co
-    COMMENT "Copying HIP kernel code object"
-)
+    # Copy kernel code object to output directory
+    add_custom_command(TARGET texture_loader_example POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_PROPERTY:render_kernel,HIP_CODE_OBJECT>
+            $<TARGET_FILE_DIR:texture_loader_example>/render_kernel.co
+        COMMENT "Copying HIP kernel code object"
+    )
 
-# Add dependency to ensure kernel is built first
-add_dependencies(texture_loader_example render_kernel)
+    # Add dependency to ensure kernel is built first
+    add_dependencies(texture_loader_example render_kernel)
+endif()
 
 # Installation
 install(TARGETS hip_demand_texture
