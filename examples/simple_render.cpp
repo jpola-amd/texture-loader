@@ -1,4 +1,4 @@
-#include "DemandTextureLoader.h"
+#include "DemandLoading/DemandTextureLoader.h"
 #include <hip/hip_runtime.h>
 #include <iostream>
 #include <vector>

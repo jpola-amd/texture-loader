@@ -43,10 +43,7 @@ endif()
 
 # Library
 set(TEXTURE_LOADER_SOURCES
-    src/DemandTextureLoader.cpp
-    src/TextureRegistry.cpp
-    src/ImageReader.cpp
-    src/RequestBuffer.cpp
+    src/DemandLoading/DemandTextureLoader.cpp
 )
 
 if(USE_OIIO)

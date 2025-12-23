@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DemandLoading/DeviceContext.h"
 #include <hip/hip_runtime.h>
 #include <string>
 #include <memory>
@@ -54,17 +55,6 @@ struct TextureHandle {
     int height = 0;
     int channels = 0;
     LoaderError error = LoaderError::Success;
-};
-
-// Device context passed to kernels
-struct DeviceContext {
-    uint32_t* residentFlags;      // Bit flags for texture residency
-    hipTextureObject_t* textures; // Array of texture objects
-    uint32_t* requests;           // Request buffer
-    uint32_t* requestCount;       // Atomic counter for requests
-    uint32_t* requestOverflow;    // Flag set when request buffer overflows
-    uint32_t maxTextures;
-    uint32_t maxRequests;
 };
 
 class DemandTextureLoader {

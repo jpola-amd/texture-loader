@@ -2,7 +2,7 @@
 // Loads and compares various image formats (EXR, HDR, TIFF, PNG)
 // Shows format detection, statistics, and pixel data access
 
-#include "DemandTextureLoader.h"
+#include "DemandLoading/DemandTextureLoader.h"
 #include <iostream>
 #include <vector>
 #include <string>

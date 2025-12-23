@@ -1,4 +1,4 @@
-#include "DemandTextureLoader.h"
+#include "DemandLoading/DemandTextureLoader.h"
 #include <algorithm>
 #include <mutex>
 #include <unordered_map>

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "DemandTextureLoader.h"
+#include "DemandLoading/DeviceContext.h"
 #include <hip/hip_runtime.h>
 #include <hip/texture_types.h>
 

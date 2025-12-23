@@ -138,8 +138,8 @@ See [BUILD.md](BUILD.md) for comprehensive build instructions including:
 ### Basic Example
 
 ```cpp
-#include "DemandTextureLoader.h"
-#include "TextureSampling.h"
+#include "DemandLoading/DemandTextureLoader.h"
+#include "DemandLoading/TextureSampling.h"
 
 // Create loader
 hip_demand::LoaderOptions options;
@@ -274,7 +274,7 @@ struct TextureDesc {
 ### Device-Side API
 
 ```cpp
-#include "TextureSampling.h"
+#include "DemandLoading/TextureSampling.h"
 
 __global__ void myKernel(hip_demand::DeviceContext ctx, uint32_t texId) {
     float u = ..., v = ...;
