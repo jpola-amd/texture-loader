@@ -1,0 +1,47 @@
+.vscode/
+build/
+# Build directories
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+
+reference/
+
+# Visual Studio
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+!CMakeLists.txt
+!cmake/FindHIP.cmake
+
+# Compiled files
+*.o
+*.obj
+*.co
+*.exe
+*.dll
+*.so
+*.a
+*.lib
+
+# IDE
+.vscode/
+.idea/
+
+# Generated images
+*.png
+*.jpg
+*.bmp
+
+# OS
+.DS_Store
+Thumbs.db
