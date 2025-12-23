@@ -60,6 +60,62 @@ If using a custom ROCm installation:
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DHIP_PATH="E:\Custom\Path\To\hip\win64"
 ```
 
+### Building with Examples
+
+Examples are disabled by default. To enable:
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_EXAMPLES=ON
+```
+
+### OpenImageIO Support (Optional)
+
+For advanced image format support (EXR, HDR, TIFF 16/32-bit, etc.):
+
+**Quick Setup (vcpkg - Recommended)**:
+```powershell
+# Install OpenImageIO and dependencies via vcpkg
+vcpkg install openimageio:x64-windows
+
+# Configure with vcpkg toolchain
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+      -DUSE_OIIO=ON `
+      -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake"
+
+cmake --build build --config Release
+```
+
+**Custom OIIO Build**:
+
+If you have OpenImageIO built from source or installed elsewhere:
+
+1. Copy the example configuration script:
+   ```powershell
+   Copy-Item cmake_configure_vs17_oiio.cmd.example cmake_configure_vs17.cmd
+   ```
+
+2. Edit `cmake_configure_vs17.cmd` and update all `<PATH_TO_*>` placeholders with your actual installation paths
+
+3. Run the configuration script:
+   ```powershell
+   .\cmake_configure_vs17.cmd
+   cmake --build build --config Release
+   ```
+
+The example script includes:
+- Detailed path configuration for OpenImageIO and all dependencies
+- Multiple installation examples (vcpkg, custom builds, Conan)
+- Complete troubleshooting guide
+- Dependency overview
+
+**Required Dependencies** (when building OIIO from source):
+- Imath 3.1+
+- OpenEXR 3.1+
+- libtiff 4.0+
+- libpng 1.6+
+- libjpeg or libjpeg-turbo
+- zlib 1.2+
+
 ## Linux Build
 
 ```bash
@@ -71,12 +127,19 @@ mkdir -p external/stb
 wget -O external/stb/stb_image.h https://raw.githubusercontent.com/nothings/stb/master/stb_image.h
 wget -O external/stb/stb_image_write.h https://raw.githubusercontent.com/nothings/stb/master/stb_image_write.h
 
-# 3. Build
+# 3. Build (library only)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/rocm
 cmake --build build -j$(nproc)
 
-# 4. Run
+# 4. Build with examples
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/rocm -DBUILD_EXAMPLES=ON
+cmake --build build -j$(nproc)
 ./build/texture_loader_example
+
+# 5. Build with OpenImageIO (optional)
+sudo apt install libopenimageio-dev
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/rocm -DUSE_OIIO=ON
+cmake --build build -j$(nproc)
 ```
 
 ## HIP Module API

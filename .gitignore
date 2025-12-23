@@ -23,6 +23,11 @@ cmake_install.cmake
 !CMakeLists.txt
 !cmake/FindHIP.cmake
 
+# Local configuration (user-specific paths)
+cmake_configure_vs17.cmd
+cmake_configure_*.cmd
+!cmake_configure_*.cmd.example
+
 # Compiled files
 *.o
 *.obj

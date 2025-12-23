@@ -22,6 +22,7 @@ set(STB_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/stb" CACHE PATH "Path 
 
 # Build options
 option(BUILD_EXAMPLES "Build example applications" OFF)
+option(USE_OIIO "Use OpenImageIO for image loading" OFF)
 
 # GPU architectures to compile for
 set(HIP_ARCHITECTURES "" CACHE STRING "GPU architectures to compile for (semicolon-separated)")
@@ -32,13 +33,29 @@ else()
     message(STATUS "Using custom HIP architectures: ${HIP_ARCHITECTURES}")
 endif()
 
+# Find OpenImageIO if requested
+if(USE_OIIO)
+    find_package(Imath REQUIRED)
+    find_package(OpenEXR REQUIRED)
+    find_package(OpenImageIO REQUIRED)
+    message(STATUS "Using OpenImageIO for image loading")
+endif()
+
 # Library
-add_library(hip_demand_texture
+set(TEXTURE_LOADER_SOURCES
     src/DemandTextureLoader.cpp
     src/TextureRegistry.cpp
     src/ImageReader.cpp
     src/RequestBuffer.cpp
 )
+
+if(USE_OIIO)
+    list(APPEND TEXTURE_LOADER_SOURCES
+        src/ImageSource/OIIOReader.cpp
+    )
+endif()
+
+add_library(hip_demand_texture ${TEXTURE_LOADER_SOURCES})
 
 target_include_directories(hip_demand_texture
     PUBLIC
@@ -54,6 +71,12 @@ target_link_libraries(hip_demand_texture
 )
 
 target_compile_definitions(hip_demand_texture PRIVATE __HIP_PLATFORM_AMD__)
+
+# Add OpenImageIO support if enabled
+if(USE_OIIO)
+    target_compile_definitions(hip_demand_texture PRIVATE USE_OIIO)
+    target_link_libraries(hip_demand_texture PRIVATE OpenImageIO::OpenImageIO)
+endif()
 
 # Examples (optional)
 if(BUILD_EXAMPLES)

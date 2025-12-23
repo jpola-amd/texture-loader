@@ -9,6 +9,11 @@
 #include <cstring>
 #include <cmath>
 
+#ifdef USE_OIIO
+#include "ImageSource/ImageSource.h"
+#include "ImageSource/OIIOReader.h"
+#endif
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
@@ -156,6 +161,39 @@ public:
         info.resident = false;
         
         // Try to get image dimensions without loading
+#ifdef USE_OIIO
+        // Try OIIO first for better format support
+        try {
+            std::unique_ptr<ImageSource> imgSrc = createImageSource(filename);
+            if (imgSrc && imgSrc->open(filename)) {
+                const auto& texInfo = imgSrc->getInfo();
+                info.width = texInfo.width;
+                info.height = texInfo.height;
+                info.channels = 4;  // OIIO always converts to RGBA
+                imgSrc->close();
+            } else {
+                // Fall back to stb_image
+                int w, h, c;
+                if (stbi_info(filename.c_str(), &w, &h, &c)) {
+                    info.width = w;
+                    info.height = h;
+                    info.channels = c;
+                } else {
+                    info.lastError = LoaderError::FileNotFound;
+                }
+            }
+        } catch (...) {
+            // Fall back to stb_image on any exception
+            int w, h, c;
+            if (stbi_info(filename.c_str(), &w, &h, &c)) {
+                info.width = w;
+                info.height = h;
+                info.channels = c;
+            } else {
+                info.lastError = LoaderError::FileNotFound;
+            }
+        }
+#else
         int w, h, c;
         if (stbi_info(filename.c_str(), &w, &h, &c)) {
             info.width = w;
@@ -164,6 +202,7 @@ public:
         } else {
             info.lastError = LoaderError::FileNotFound;
         }
+#endif
         
         lastError_ = LoaderError::Success;
         return TextureHandle{id, true, info.width, info.height, info.channels, LoaderError::Success};
@@ -494,15 +533,55 @@ private:
         int width, height, channels;
         
         if (!info.filename.empty()) {
-            // Force 4 channels for consistency
-            data = stbi_load(info.filename.c_str(), &width, &height, &channels, 4);
-            if (!data) {
-                info.loading = false;
-                info.lastError = LoaderError::ImageLoadFailed;
-                return false;
+#ifdef USE_OIIO
+            // Try OIIO first for better format support
+            bool oiioSuccess = false;
+            try {
+                std::unique_ptr<ImageSource> imgSrc = createImageSource(info.filename);
+                if (imgSrc && imgSrc->open(info.filename)) {
+                    const auto& texInfo = imgSrc->getInfo();
+                    width = texInfo.width;
+                    height = texInfo.height;
+                    channels = 4;  // OIIO always provides RGBA
+                    
+                    // Allocate memory for base level
+                    size_t imageSize = width * height * 4;
+                    data = new unsigned char[imageSize];
+                    
+                    // Read base mip level
+                    if (imgSrc->readMipLevel(data, 0, imageSize)) {
+                        needsFree = true;
+                        oiioSuccess = true;
+                    } else {
+                        delete[] data;
+                        data = nullptr;
+                    }
+                    imgSrc->close();
+                }
+            } catch (...) {
+                // Fall through to stb_image
+                if (data) {
+                    delete[] data;
+                    data = nullptr;
+                }
+                oiioSuccess = false;
             }
-            needsFree = true;
-            channels = 4;  // stbi_load forces 4 channels
+            
+            // Fall back to stb_image if OIIO failed
+            if (!oiioSuccess) {
+#endif
+                // Force 4 channels for consistency
+                data = stbi_load(info.filename.c_str(), &width, &height, &channels, 4);
+                if (!data) {
+                    info.loading = false;
+                    info.lastError = LoaderError::ImageLoadFailed;
+                    return false;
+                }
+                needsFree = true;
+                channels = 4;  // stbi_load forces 4 channels
+#ifdef USE_OIIO
+            }
+#endif
         } else if (info.cachedData) {
             // Use cached data - convert to 4 channels if needed
             width = info.width;
