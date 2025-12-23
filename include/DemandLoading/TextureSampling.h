@@ -9,15 +9,26 @@ namespace hip_demand {
 // Device-side texture sampling functions
 // These check residency and record requests if needed
 
-__device__ inline bool isTextureResident(const DeviceContext& ctx, uint32_t texId) {
+__device__ __forceinline__ bool isTextureResident(const DeviceContext& ctx, uint32_t texId) {
     if (texId >= ctx.maxTextures) return false;
-    uint32_t wordIdx = texId / 32;
-    uint32_t bitIdx = texId % 32;
+    const uint32_t wordIdx = texId >> 5;   // divide by 32
+    const uint32_t bitIdx  = texId & 31u;  // modulo 32
     return (ctx.residentFlags[wordIdx] & (1u << bitIdx)) != 0;
 }
 
-__device__ inline void recordTextureRequest(const DeviceContext& ctx, uint32_t texId) {
-    uint32_t idx = atomicAdd(ctx.requestCount, 1u);
+// Warp-level deduplication: only the first lane for a given texId appends a request.
+__device__ __forceinline__ void recordTextureRequest(const DeviceContext& ctx, uint32_t texId) {
+    // If overflow already flagged, skip atomics to reduce contention
+    if (atomicAdd(ctx.requestOverflow, 0u) != 0u) return;
+
+    // Deduplicate within a warp/wave using match_any; only the leader appends
+    const unsigned active = __ballot_sync(0xFFFFFFFFu, true);
+    const unsigned match = __match_any_sync(active, texId);
+    const int leader = __ffs(match) - 1;  // lowest set bit index
+    const int lane = static_cast<int>(__lane_id());
+    if (lane != leader) return;
+
+    const uint32_t idx = atomicAdd(ctx.requestCount, 1u);
     if (idx < ctx.maxRequests) {
         ctx.requests[idx] = texId;
     } else {
