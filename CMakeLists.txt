@@ -94,6 +94,22 @@ if(BUILD_EXAMPLES)
         INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
 
+    hip_add_executable(
+        TARGET mega_texture_kernel
+        SOURCES examples/mega_texture_kernel.hip
+        ARCHITECTURES ${HIP_ARCHITECTURES}
+            OPTIONS -O3 --std=c++17 -DHIP_ENABLE_WARP_SYNC_BUILTINS
+        INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    hip_add_executable(
+        TARGET atlas_render_kernel
+        SOURCES examples/atlas_render_kernel.hip
+        ARCHITECTURES ${HIP_ARCHITECTURES}
+            OPTIONS -O3 --std=c++17 -DHIP_ENABLE_WARP_SYNC_BUILTINS
+        INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
     # Example application (host code only)
     add_executable(texture_loader_example
         examples/simple_render.cpp
@@ -103,6 +119,14 @@ if(BUILD_EXAMPLES)
         examples/tiled_render.cpp
     )
 
+    add_executable(mega_texture_example
+        examples/mega_texture_render.cpp
+    )
+
+    add_executable(atlas_render_example
+        examples/atlas_render.cpp
+    )
+
     target_include_directories(texture_loader_example
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -110,6 +134,18 @@ if(BUILD_EXAMPLES)
     )
 
     target_include_directories(tiled_render_example
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${STB_INCLUDE_DIR}
+    )
+
+    target_include_directories(mega_texture_example
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${STB_INCLUDE_DIR}
+    )
+
+    target_include_directories(atlas_render_example
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${STB_INCLUDE_DIR}
@@ -127,6 +163,18 @@ if(BUILD_EXAMPLES)
     )
     target_compile_definitions(tiled_render_example PRIVATE __HIP_PLATFORM_AMD__)
 
+    target_link_libraries(mega_texture_example
+        PRIVATE
+            hip_demand_texture
+    )
+    target_compile_definitions(mega_texture_example PRIVATE __HIP_PLATFORM_AMD__)
+
+    target_link_libraries(atlas_render_example
+        PRIVATE
+            hip_demand_texture
+    )
+    target_compile_definitions(atlas_render_example PRIVATE __HIP_PLATFORM_AMD__)
+
     # Copy kernel code object to output directory
     add_custom_command(TARGET texture_loader_example POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -142,9 +190,25 @@ if(BUILD_EXAMPLES)
         COMMENT "Copying HIP kernel code object"
     )
 
+    add_custom_command(TARGET mega_texture_example POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_PROPERTY:mega_texture_kernel,HIP_CODE_OBJECT>
+            $<TARGET_FILE_DIR:mega_texture_example>/mega_texture_kernel.co
+        COMMENT "Copying HIP kernel code object"
+    )
+
+    add_custom_command(TARGET atlas_render_example POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_PROPERTY:atlas_render_kernel,HIP_CODE_OBJECT>
+            $<TARGET_FILE_DIR:atlas_render_example>/atlas_render_kernel.co
+        COMMENT "Copying HIP kernel code object"
+    )
+
     # Add dependency to ensure kernel is built first
     add_dependencies(texture_loader_example render_kernel)
     add_dependencies(tiled_render_example tiled_render_kernel)
+    add_dependencies(mega_texture_example mega_texture_kernel)
+    add_dependencies(atlas_render_example atlas_render_kernel)
     
     # OpenImageIO format example (only if OIIO is enabled)
     if(USE_OIIO)
