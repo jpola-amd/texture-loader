@@ -114,7 +114,7 @@ bool OIIOReader::loadImage()
     std::vector<unsigned char> baseLevel(baseSize);
     
     // Read and convert to UINT8 RGBA
-    bool success = inp->read_image(OIIO::TypeDesc::UINT8, baseLevel.data());
+    bool success = inp->read_image(0, 0, 0, spec.nchannels, OIIO::TypeDesc::UINT8, baseLevel.data());
     inp->close();
     
     if (!success) return false;
@@ -255,9 +255,9 @@ double OIIOReader::getTotalReadTime() const
 }
 
 // Factory function implementation
-std::shared_ptr<ImageSource> createImageSource(const std::string& filename)
+std::unique_ptr<ImageSource> createImageSource(const std::string& filename)
 {
-    return std::make_shared<OIIOReader>(filename);
+    return std::make_unique<OIIOReader>(filename);
 }
 
 }  // namespace hip_demand

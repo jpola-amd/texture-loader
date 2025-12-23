@@ -12,7 +12,7 @@ namespace hip_demand {
 
 /// Image reader using OpenImageIO
 /// Supports many formats: PNG, JPEG, TIFF, EXR, HDR, TGA, BMP, etc.
-class OIIOReader : public ImageSourceBase
+class OIIOReader : public ImageSource
 {
   public:
     /// Constructor

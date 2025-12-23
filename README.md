@@ -22,6 +22,28 @@
 
 ### Windows (Visual Studio 2022)
 
+**Using vcpkg (Recommended)**:
+```powershell
+# 1. Install vcpkg if you haven't already
+git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+cd C:\vcpkg
+.\bootstrap-vcpkg.bat
+.\vcpkg integrate install
+
+# 2. Install OpenImageIO (provides all dependencies)
+cd C:\vcpkg
+.\vcpkg install openimageio:x64-windows
+
+# 3. Build with vcpkg toolchain
+cd <your-project-dir>
+cmake -B build -S . -G "Visual Studio 17 2022" -A x64 `
+      -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+      -DBUILD_EXAMPLES=ON -DUSE_OIIO=ON
+cmake --build build --config Release
+.\build\Release\texture_loader_example.exe
+```
+
+**Basic Build (without OpenImageIO)**:
 ```powershell
 # Set HIP_PATH
 $env:HIP_PATH = "C:\Program Files\AMD\ROCm\6.4"
@@ -36,15 +58,9 @@ cmake --build build --config Release
 .\build\Release\texture_loader_example.exe
 ```
 
-**With OpenImageIO** (for EXR, HDR, advanced formats):
+**Advanced: Custom OpenImageIO Build**:
 ```powershell
-# Using vcpkg (recommended)
-vcpkg install openimageio:x64-windows
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ^
-      -DBUILD_EXAMPLES=ON -DUSE_OIIO=ON ^
-      -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake"
-
-# Or using custom OIIO build (copy and edit example script)
+# For manually built OIIO (copy and edit example script)
 Copy-Item cmake_configure_vs17_oiio.cmd.example cmake_configure_vs17.cmd
 # Edit cmake_configure_vs17.cmd with your paths
 .\cmake_configure_vs17.cmd
@@ -168,6 +184,33 @@ __global__ void myKernel(hip_demand::DeviceContext ctx, uint32_t texId) {
     }
 }
 ```
+
+### OpenImageIO Format Example
+
+When built with `-DUSE_OIIO=ON`, an additional example demonstrates advanced format support:
+
+```bash
+# Test various image formats
+.\build\Release\oiio_formats_example.exe texture.exr texture.hdr texture.tif
+
+# Example output:
+# ✓ OpenImageIO support ENABLED
+# Testing: texture.exr
+# Resolution:    2048 x 1024
+# Channels:      4
+# Mip Levels:    11
+# Pixel Format:  FLOAT32 (float)
+# Base Size:     8192 KB
+# ✓ Successfully read base mip level
+# Center pixel:  RGBA(128, 64, 32, 255)
+```
+
+See [examples/oiio_formats.cpp](examples/oiio_formats.cpp) for:
+- Loading EXR, HDR, TIFF 16/32-bit files
+- Format detection and statistics
+- Mip level access
+- Direct ImageSource API usage
+- DemandTextureLoader integration
 
 ## API Reference
 

@@ -49,16 +49,6 @@ class ImageSource
     virtual double getTotalReadTime() const = 0;
 };
 
-/// Base class with default implementations
-class ImageSourceBase : public ImageSource
-{
-  public:
-    ~ImageSourceBase() override = default;
-
-    unsigned long long getNumBytesRead() const override { return 0u; }
-    double getTotalReadTime() const override { return 0.0; }
-};
-
 /// Calculate number of mip levels for given dimensions
 inline unsigned int calculateNumMipLevels(unsigned int width, unsigned int height)
 {
@@ -67,6 +57,6 @@ inline unsigned int calculateNumMipLevels(unsigned int width, unsigned int heigh
 }
 
 /// Factory function to create image source from file
-std::shared_ptr<ImageSource> createImageSource(const std::string& filename);
+std::unique_ptr<ImageSource> createImageSource(const std::string& filename);
 
 }  // namespace hip_demand

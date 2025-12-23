@@ -20,7 +20,13 @@ Complete guide for building the HIP Demand Texture Loader on Windows and Linux.
 - **C++17 Compiler**:
   - Windows: Visual Studio 2022
   - Linux: GCC 9+ or Clang 10+
-- **stb_image**: Header-only library
+
+### Image Loading (choose one):
+
+- **stb_image**: Header-only library (default, basic formats)
+- **OpenImageIO**: Advanced formats (EXR, HDR, TIFF 16/32-bit, etc.)
+  - **Recommended**: Install via vcpkg (handles all dependencies automatically)
+  - Alternative: Build from source or use system package manager
 
 ### Supported GPUs
 
@@ -31,13 +37,46 @@ Complete guide for building the HIP Demand Texture Loader on Windows and Linux.
 
 ## Windows Build (Visual Studio 2022)
 
-### Quick Start
+### Method 1: Using vcpkg (Recommended)
+
+The easiest way to get started with full format support:
+
+```powershell
+# 1. Install and setup vcpkg (one-time setup)
+cd C:\
+git clone https://github.com/microsoft/vcpkg.git
+cd vcpkg
+.\bootstrap-vcpkg.bat
+.\vcpkg integrate install  # Makes packages available to all VS projects
+
+# 2. Install OpenImageIO (includes all dependencies: stb, libpng, libjpeg, libtiff, OpenEXR, etc.)
+.\vcpkg install openimageio:x64-windows
+
+# 3. Build your project with vcpkg toolchain
+cd <your-project-directory>
+cmake -B build -S . `
+      -G "Visual Studio 17 2022" -A x64 `
+      -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+      -DBUILD_EXAMPLES=ON `
+      -DUSE_OIIO=ON
+
+cmake --build build --config Release
+
+# 4. Run
+.\build\Release\texture_loader_example.exe
+```
+
+**Note**: Adjust the vcpkg path if you installed it elsewhere. The first build will take ~5-10 minutes as vcpkg compiles OpenImageIO and its dependencies.
+
+### Method 2: Basic Build (stb_image only)
+
+For basic image format support (PNG, JPEG, BMP, TGA, HDR):
 
 ```powershell
 # 1. Set HIP_PATH
 $env:HIP_PATH = "C:\Program Files\AMD\ROCm\6.4"
 
-# 2. Download dependencies
+# 2. Download stb headers
 New-Item -ItemType Directory -Force -Path external\stb
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/nothings/stb/master/stb_image.h" `
                   -OutFile "external\stb\stb_image.h"
@@ -45,7 +84,7 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/nothings/stb/master/st
                   -OutFile "external\stb\stb_image_write.h"
 
 # 3. Build
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_EXAMPLES=ON
 cmake --build build --config Release
 
 # 4. Run
@@ -68,24 +107,9 @@ Examples are disabled by default. To enable:
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_EXAMPLES=ON
 ```
 
-### OpenImageIO Support (Optional)
+### Method 3: Custom OpenImageIO Build
 
-For advanced image format support (EXR, HDR, TIFF 16/32-bit, etc.):
-
-**Quick Setup (vcpkg - Recommended)**:
-```powershell
-# Install OpenImageIO and dependencies via vcpkg
-vcpkg install openimageio:x64-windows
-
-# Configure with vcpkg toolchain
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-      -DUSE_OIIO=ON `
-      -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake"
-
-cmake --build build --config Release
-```
-
-**Custom OIIO Build**:
+For advanced users with existing OpenImageIO installations:
 
 If you have OpenImageIO built from source or installed elsewhere:
 
@@ -118,27 +142,53 @@ The example script includes:
 
 ## Linux Build
 
+### Using System Package Manager (Recommended)
+
 ```bash
 # 1. Install ROCm
 sudo apt install rocm-hip-sdk
 
-# 2. Download dependencies
+# 2. Install OpenImageIO (includes all dependencies)
+sudo apt install libopenimageio-dev
+
+# 3. Build with OpenImageIO support
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/rocm -DUSE_OIIO=ON -DBUILD_EXAMPLES=ON
+cmake --build build -j$(nproc)
+./build/texture_loader_example
+```
+
+### Basic Build (stb_image only)
+
+```bash
+# 1. Install ROCm
+sudo apt install rocm-hip-sdk
+
+# 2. Download stb headers
 mkdir -p external/stb
 wget -O external/stb/stb_image.h https://raw.githubusercontent.com/nothings/stb/master/stb_image.h
 wget -O external/stb/stb_image_write.h https://raw.githubusercontent.com/nothings/stb/master/stb_image_write.h
 
-# 3. Build (library only)
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/rocm
-cmake --build build -j$(nproc)
-
-# 4. Build with examples
+# 3. Build
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/rocm -DBUILD_EXAMPLES=ON
 cmake --build build -j$(nproc)
 ./build/texture_loader_example
+```
 
-# 5. Build with OpenImageIO (optional)
-sudo apt install libopenimageio-dev
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/rocm -DUSE_OIIO=ON
+### Alternative: Using vcpkg on Linux
+
+```bash
+# Install vcpkg
+git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
+~/vcpkg/bootstrap-vcpkg.sh
+
+# Install OpenImageIO
+~/vcpkg/vcpkg install openimageio:x64-linux
+
+# Build with vcpkg toolchain
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH=/opt/rocm \
+      -DCMAKE_TOOLCHAIN_FILE=~/vcpkg/scripts/buildsystems/vcpkg.cmake \
+      -DUSE_OIIO=ON -DBUILD_EXAMPLES=ON
 cmake --build build -j$(nproc)
 ```
 

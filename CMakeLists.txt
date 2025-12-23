@@ -116,6 +116,27 @@ if(BUILD_EXAMPLES)
 
     # Add dependency to ensure kernel is built first
     add_dependencies(texture_loader_example render_kernel)
+    
+    # OpenImageIO format example (only if OIIO is enabled)
+    if(USE_OIIO)
+        add_executable(oiio_formats_example
+            examples/oiio_formats.cpp
+        )
+        
+        target_include_directories(oiio_formats_example
+            PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        
+        target_link_libraries(oiio_formats_example
+            PRIVATE
+                hip_demand_texture
+        )
+        
+        target_compile_definitions(oiio_formats_example PRIVATE __HIP_PLATFORM_AMD__ USE_OIIO)
+        
+        message(STATUS "Building OpenImageIO format example")
+    endif()
 endif()
 
 # Installation

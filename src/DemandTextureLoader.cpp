@@ -33,8 +33,8 @@ const char* getErrorString(LoaderError error) {
     }
 }
 
-// Texture metadata
-struct TextureInfo {
+// Internal texture metadata (renamed to avoid conflict with ImageSource::TextureInfo)
+struct TextureMetadata {
     std::string filename;
     TextureDesc desc;
     hipTextureObject_t texObj = 0;
@@ -155,7 +155,7 @@ public:
         
         uint32_t id = nextTextureId_++;
         
-        TextureInfo& info = textures_[id];
+        TextureMetadata& info = textures_[id];
         info.filename = filename;
         info.desc = desc;
         info.resident = false;
@@ -165,21 +165,24 @@ public:
         // Try OIIO first for better format support
         try {
             std::unique_ptr<ImageSource> imgSrc = createImageSource(filename);
-            if (imgSrc && imgSrc->open(filename)) {
-                const auto& texInfo = imgSrc->getInfo();
-                info.width = texInfo.width;
-                info.height = texInfo.height;
-                info.channels = 4;  // OIIO always converts to RGBA
-                imgSrc->close();
-            } else {
-                // Fall back to stb_image
-                int w, h, c;
-                if (stbi_info(filename.c_str(), &w, &h, &c)) {
-                    info.width = w;
-                    info.height = h;
-                    info.channels = c;
+            if (imgSrc) {
+                hip_demand::TextureInfo texInfo;
+                imgSrc->open(&texInfo);
+                if (imgSrc->isOpen()) {
+                    info.width = texInfo.width;
+                    info.height = texInfo.height;
+                    info.channels = 4;  // OIIO always converts to RGBA
+                    imgSrc->close();
                 } else {
-                    info.lastError = LoaderError::FileNotFound;
+                    // Fall back to stb_image
+                    int w, h, c;
+                    if (stbi_info(filename.c_str(), &w, &h, &c)) {
+                        info.width = w;
+                        info.height = h;
+                        info.channels = c;
+                    } else {
+                        info.lastError = LoaderError::FileNotFound;
+                    }
                 }
             }
         } catch (...) {
@@ -224,7 +227,7 @@ public:
         
         uint32_t id = nextTextureId_++;
         
-        TextureInfo& info = textures_[id];
+        TextureMetadata& info = textures_[id];
         info.filename = "";  // Memory-based texture
         info.desc = desc;
         info.width = width;
@@ -351,7 +354,7 @@ public:
                     if (uniqueRequests.insert(texId).second) {
                         toLoad.push_back(texId);
                         // Calculate actual memory needed
-                        const TextureInfo& info = textures_[texId];
+                        const TextureMetadata& info = textures_[texId];
                         int w = info.width;
                         int h = info.height;
                         if (w > 0 && h > 0) {
@@ -519,7 +522,7 @@ private:
         return true;
     }
     bool loadTexture(uint32_t texId) {
-        TextureInfo& info = textures_[texId];
+        TextureMetadata& info = textures_[texId];
         
         if (info.resident || info.loading) {
             return false;
@@ -538,25 +541,28 @@ private:
             bool oiioSuccess = false;
             try {
                 std::unique_ptr<ImageSource> imgSrc = createImageSource(info.filename);
-                if (imgSrc && imgSrc->open(info.filename)) {
-                    const auto& texInfo = imgSrc->getInfo();
-                    width = texInfo.width;
-                    height = texInfo.height;
-                    channels = 4;  // OIIO always provides RGBA
-                    
-                    // Allocate memory for base level
-                    size_t imageSize = width * height * 4;
-                    data = new unsigned char[imageSize];
-                    
-                    // Read base mip level
-                    if (imgSrc->readMipLevel(data, 0, imageSize)) {
-                        needsFree = true;
-                        oiioSuccess = true;
-                    } else {
-                        delete[] data;
-                        data = nullptr;
+                if (imgSrc) {
+                    hip_demand::TextureInfo texInfo;
+                    imgSrc->open(&texInfo);
+                    if (imgSrc->isOpen()) {
+                        width = texInfo.width;
+                        height = texInfo.height;
+                        channels = 4;  // OIIO always provides RGBA
+                        
+                        // Allocate memory for base level
+                        size_t imageSize = width * height * 4;
+                        data = new unsigned char[imageSize];
+                        
+                        // Read base mip level
+                        if (imgSrc->readMipLevel(reinterpret_cast<char*>(data), 0, width, height)) {
+                            needsFree = true;
+                            oiioSuccess = true;
+                        } else {
+                            delete[] data;
+                            data = nullptr;
+                        }
+                        imgSrc->close();
                     }
-                    imgSrc->close();
                 }
             } catch (...) {
                 // Fall through to stb_image
@@ -774,7 +780,7 @@ private:
     }
     
     void destroyTexture(uint32_t texId) {
-        TextureInfo& info = textures_[texId];
+        TextureMetadata& info = textures_[texId];
         
         if (!info.resident) return;
         
@@ -859,7 +865,7 @@ private:
     std::vector<uint32_t> h_requests_;
     
     // Texture storage
-    std::vector<TextureInfo> textures_;
+    std::vector<TextureMetadata> textures_;
     uint32_t nextTextureId_ = 0;
     uint32_t currentFrame_ = 0;
     size_t totalMemoryUsage_ = 0;
