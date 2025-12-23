@@ -5,6 +5,7 @@
 #include <cmath>
 #include <chrono>
 #include <fstream>
+#include <filesystem>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -62,6 +63,7 @@ void generateCheckerboard(const char* filename, int size) {
 }
 
 int main(int argc, char** argv) {
+    namespace fs = std::filesystem;
     std::cout << "HIP Demand Texture Loader Example\n";
     std::cout << "==================================\n\n";
     
@@ -102,32 +104,44 @@ int main(int argc, char** argv) {
     // Generate test textures in memory
     for (int i = 0; i < 16; i++) {
         int size = 512 + i * 128;
-        std::vector<uint8_t> data(size * size * 4);
-        
-        // Generate unique pattern for each texture
-        for (int y = 0; y < size; y++) {
-            for (int x = 0; x < size; x++) {
-                int idx = (y * size + x) * 4;
-                data[idx + 0] = (i * 16) % 256;          // R varies by texture
-                data[idx + 1] = (x * 255) / size;        // G varies by x
-                data[idx + 2] = (y * 255) / size;        // B varies by y
-                data[idx + 3] = 255;
-            }
-        }
-        
-        // Save texture to file
         char filename[256];
         sprintf(filename, "texture_%02d.png", i);
-        stbi_write_png(filename, size, size, 4, data.data(), size * 4);
-        std::cout << "  Saved: " << filename << " (" << size << "x" << size << ")\n";
-        
-        hip_demand::TextureDesc desc;
-        desc.addressMode = hipAddressModeWrap;
-        desc.filterMode = hipFilterModeLinear;
-        desc.generateMipmaps = true;  // Enable mipmaps for better quality
-        
-        auto handle = loader.createTextureFromMemory(
-            data.data(), size, size, 4, desc);
+        hip_demand::TextureHandle handle;
+
+        // Reuse existing textures if present in the current directory
+        if (fs::exists(filename)) {
+            hip_demand::TextureDesc desc;
+            desc.addressMode = hipAddressModeWrap;
+            desc.filterMode = hipFilterModeLinear;
+            desc.generateMipmaps = true;
+            handle = loader.createTexture(filename, desc);
+            if (handle.valid) {
+                std::cout << "  Loaded existing: " << filename << " (" << handle.width << "x" << handle.height << ")\n";
+            }
+        } else {
+            std::vector<uint8_t> data(size * size * 4);
+            // Generate unique pattern for each texture
+            for (int y = 0; y < size; y++) {
+                for (int x = 0; x < size; x++) {
+                    int idx = (y * size + x) * 4;
+                    data[idx + 0] = (i * 16) % 256;          // R varies by texture
+                    data[idx + 1] = (x * 255) / size;        // G varies by x
+                    data[idx + 2] = (y * 255) / size;        // B varies by y
+                    data[idx + 3] = 255;
+                }
+            }
+
+            stbi_write_png(filename, size, size, 4, data.data(), size * 4);
+            std::cout << "  Saved: " << filename << " (" << size << "x" << size << ")\n";
+
+            hip_demand::TextureDesc desc;
+            desc.addressMode = hipAddressModeWrap;
+            desc.filterMode = hipFilterModeLinear;
+            desc.generateMipmaps = true;  // Enable mipmaps for better quality
+
+            handle = loader.createTextureFromMemory(
+                data.data(), size, size, 4, desc);
+        }
         
         if (handle.valid) {
             textureIds.push_back(handle.id);
