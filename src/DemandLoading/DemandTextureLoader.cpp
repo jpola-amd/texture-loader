@@ -1,4 +1,5 @@
 #include "DemandLoading/DemandTextureLoader.h"
+#include "DemandLoading/Logging.h"
 #include <algorithm>
 #include <mutex>
 #include <unordered_map>
@@ -176,6 +177,7 @@ public:
         
         if (nextTextureId_ >= options_.maxTextures) {
             lastError_ = LoaderError::MaxTexturesExceeded;
+            logMessage(LogLevel::Error, "createTexture: max textures exceeded (%zu)", static_cast<size_t>(options_.maxTextures));
             return TextureHandle{0, false, 0, 0, 0, lastError_};
         }
         
@@ -230,10 +232,12 @@ public:
             info.channels = c;
         } else {
             info.lastError = LoaderError::FileNotFound;
+            logMessage(LogLevel::Warn, "createTexture: file not found '%s'", filename.c_str());
         }
 #endif
         
         lastError_ = LoaderError::Success;
+        logMessage(LogLevel::Debug, "createTexture: queued '%s' as id=%u (%dx%d ch=%d)", filename.c_str(), id, info.width, info.height, info.channels);
         return TextureHandle{id, true, info.width, info.height, info.channels, LoaderError::Success};
     }
     
@@ -243,11 +247,13 @@ public:
         
         if (!data || width <= 0 || height <= 0 || channels <= 0) {
             lastError_ = LoaderError::InvalidParameter;
+            logMessage(LogLevel::Error, "createTextureFromMemory: invalid parameters (w=%d h=%d ch=%d)", width, height, channels);
             return TextureHandle{0, false, 0, 0, 0, lastError_};
         }
         
         if (nextTextureId_ >= options_.maxTextures) {
             lastError_ = LoaderError::MaxTexturesExceeded;
+            logMessage(LogLevel::Error, "createTextureFromMemory: max textures exceeded (%zu)", static_cast<size_t>(options_.maxTextures));
             return TextureHandle{0, false, 0, 0, 0, lastError_};
         }
         
@@ -267,6 +273,7 @@ public:
         std::memcpy(info.cachedData.get(), data, dataSize);
         
         lastError_ = LoaderError::Success;
+        logMessage(LogLevel::Debug, "createTextureFromMemory: created id=%u (%dx%d ch=%d)", id, width, height, channels);
         return TextureHandle{id, true, width, height, channels, LoaderError::Success};
     }
     
@@ -280,6 +287,7 @@ public:
                       hipMemcpyHostToDevice, stream);
         if (err != hipSuccess) {
             lastError_ = LoaderError::HipError;
+            logMessage(LogLevel::Error, "launchPrepare: hipMemcpyAsync(residentFlags) failed: %s", hipGetErrorString(err));
             return;
         }
         
@@ -288,6 +296,7 @@ public:
                       hipMemcpyHostToDevice, stream);
         if (err != hipSuccess) {
             lastError_ = LoaderError::HipError;
+            logMessage(LogLevel::Error, "launchPrepare: hipMemcpyAsync(textures) failed: %s", hipGetErrorString(err));
             return;
         }
         
@@ -295,10 +304,12 @@ public:
         err = hipMemsetAsync(d_requestStats_, 0, sizeof(RequestStats), stream);
         if (err != hipSuccess) {
             lastError_ = LoaderError::HipError;
+            logMessage(LogLevel::Error, "launchPrepare: hipMemsetAsync(requestStats) failed: %s", hipGetErrorString(err));
             return;
         }
         
         currentFrame_++;
+        logMessage(LogLevel::Debug, "launchPrepare: frame=%u", currentFrame_);
     }
     
     DeviceContext getDeviceContext() const {
@@ -332,6 +343,10 @@ public:
         uint32_t overflow = h_requestStats_->overflow;
         lastRequestOverflow_ = (overflow != 0);
         lastRequestCount_ = requestCount;
+        if (overflow) {
+            logMessage(LogLevel::Warn, "processRequests: overflow flagged (count=%u, cap=%zu)", requestCount, static_cast<size_t>(options_.maxRequestsPerLaunch));
+        }
+        logMessage(LogLevel::Debug, "processRequests: requestCount=%u", requestCount);
         
         if (requestCount == 0) {
             return 0;
@@ -377,6 +392,7 @@ public:
                     }
                 }
             }
+            logMessage(LogLevel::Debug, "processRequests: unique-to-load=%zu estMem=%.2f MB", toLoad.size(), static_cast<double>(estimatedMemoryNeeded) / (1024.0 * 1024.0));
             
             // Check if we need eviction (with actual size estimates)
             if (options_.enableEviction && estimatedMemoryNeeded > 0) {
@@ -603,6 +619,7 @@ private:
                     lock.lock();
                     info.loading = false;
                     info.lastError = LoaderError::ImageLoadFailed;
+                    logMessage(LogLevel::Error, "loadTexture: failed to load image '%s'", filename.c_str());
                     return false;
                 }
                 needsFree = true;
@@ -644,6 +661,7 @@ private:
             lock.lock();
             info.loading = false;
             info.lastError = LoaderError::InvalidParameter;
+            logMessage(LogLevel::Error, "loadTexture: invalid parameters for texId=%u", texId);
             return false;
         }
         
@@ -787,6 +805,7 @@ private:
             lock.lock();
             info.loading = false;
             info.lastError = LoaderError::HipError;
+            logMessage(LogLevel::Error, "loadTexture: GPU upload failed for texId=%u", texId);
             return false;
         }
         
@@ -803,6 +822,7 @@ private:
         info.loading = false;
         info.lastUsedFrame = currentFrame_;
         totalMemoryUsage_ += info.memoryUsage;
+        logMessage(LogLevel::Info, "loadTexture: id=%u size=%dx%d mipLevels=%d mem=%.2f MB total=%.2f MB", texId, info.width, info.height, info.numMipLevels, static_cast<double>(info.memoryUsage) / (1024.0 * 1024.0), static_cast<double>(totalMemoryUsage_) / (1024.0 * 1024.0));
         
         return true;
     }
@@ -846,6 +866,7 @@ private:
         uint32_t bitIdx = texId % 32;
         h_residentFlags_[wordIdx] &= ~(1u << bitIdx);
         
+        logMessage(LogLevel::Debug, "destroyTexture: evicted texId=%u freed=%.2f MB", texId, static_cast<double>(info.memoryUsage) / (1024.0 * 1024.0));
         totalMemoryUsage_ -= info.memoryUsage;
         info.memoryUsage = 0;
     }
@@ -855,6 +876,8 @@ private:
         if (totalMemoryUsage_ + requiredMemory <= options_.maxTextureMemory) {
             return;
         }
+
+        logMessage(LogLevel::Debug, "evictIfNeeded: current=%.2f MB required=%.2f MB budget=%.2f MB", static_cast<double>(totalMemoryUsage_) / (1024.0 * 1024.0), static_cast<double>(requiredMemory) / (1024.0 * 1024.0), static_cast<double>(options_.maxTextureMemory) / (1024.0 * 1024.0));
         
         // Find LRU textures to evict
         std::vector<std::pair<uint32_t, uint32_t>> lruList;  // (frame, texId)
