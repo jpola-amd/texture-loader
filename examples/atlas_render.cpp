@@ -1,4 +1,5 @@
 #include "DemandLoading/DemandTextureLoader.h"
+#include "DemandLoading/Logging.h"
 #include <hip/hip_runtime.h>
 #include <iostream>
 #include <vector>
@@ -69,7 +70,7 @@ int main() {
     if (!module.load("atlas_render_kernel.co", "renderKernelWrapper")) {
         return 1;
     }
-
+    hip_demand::setLogLevel(hip_demand::LogLevel::Debug);
     hip_demand::LoaderOptions options;
     options.maxTextureMemory = 96 * 1024 * 1024; // low budget to force eviction
     options.maxTextures = 512;
