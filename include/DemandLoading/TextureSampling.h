@@ -1,29 +1,53 @@
 #pragma once
 
-#include "DemandTextureLoader.h"
+#include "DemandLoading/DeviceContext.h"
 #include <hip/hip_runtime.h>
 #include <hip/texture_types.h>
+
+#if !defined(HIP_ENABLE_WARP_SYNC_BUILTINS)
+#warning "HIP_ENABLE_WARP_SYNC_BUILTINS is not defined; warp-sync builtins may be unavailable"
+#endif
 
 namespace hip_demand {
 
 // Device-side texture sampling functions
 // These check residency and record requests if needed
 
-__device__ inline bool isTextureResident(const DeviceContext& ctx, uint32_t texId) {
+__device__ __forceinline__ bool isTextureResident(const DeviceContext& ctx, uint32_t texId) {
     if (texId >= ctx.maxTextures) return false;
-    uint32_t wordIdx = texId / 32;
-    uint32_t bitIdx = texId % 32;
+    const uint32_t wordIdx = texId >> 5;   // divide by 32
+    const uint32_t bitIdx  = texId & 31u;  // modulo 32
     return (ctx.residentFlags[wordIdx] & (1u << bitIdx)) != 0;
 }
 
-__device__ inline void recordTextureRequest(const DeviceContext& ctx, uint32_t texId) {
-    uint32_t idx = atomicAdd(ctx.requestCount, 1u);
+// Record a texture request; use warp-level dedup where supported, otherwise per-thread atomics.
+__device__ __forceinline__ void recordTextureRequest(const DeviceContext& ctx, uint32_t texId) {
+    // If overflow already flagged, skip atomics to reduce contention
+    if (atomicAdd(ctx.requestOverflow, 0u) != 0u) return;
+
+#if defined(HIP_ENABLE_WARP_SYNC_BUILTINS)
+    // Warp-level deduplication: only the leader for a given texId appends
+    const unsigned long long active = __activemask();
+    const unsigned long long match = __match_any_sync(active, texId);
+    const int leader = __ffsll(match) - 1;  // lowest set bit index
+    const int lane = static_cast<int>(__lane_id());
+    if (lane != leader) return;
+
+    const uint32_t idx = atomicAdd(ctx.requestCount, 1u);
     if (idx < ctx.maxRequests) {
         ctx.requests[idx] = texId;
     } else {
-        // Set overflow flag
         atomicExch(ctx.requestOverflow, 1u);
     }
+#else
+    // Fallback when warp-sync builtins are unavailable
+    const uint32_t idx = atomicAdd(ctx.requestCount, 1u);
+    if (idx < ctx.maxRequests) {
+        ctx.requests[idx] = texId;
+    } else {
+        atomicExch(ctx.requestOverflow, 1u);
+    }
+#endif
 }
 
 // Main texture sampling function

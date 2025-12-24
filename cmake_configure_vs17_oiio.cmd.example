@@ -1,0 +1,126 @@
+@echo off
+REM ==============================================================================
+REM CMake Configuration Script for Visual Studio 2022 with OpenImageIO Support
+REM ==============================================================================
+REM
+REM This script configures the HIP Demand Texture Loader with OpenImageIO support
+REM for advanced image format handling (EXR, HDR, TIFF 16/32-bit, etc.)
+REM
+REM PREREQUISITES:
+REM   1. ROCm/HIP 6.0+ installed
+REM   2. Visual Studio 2022
+REM   3. OpenImageIO and its dependencies built/installed
+REM
+REM USAGE:
+REM   1. Copy this file to cmake_configure_vs17.cmd
+REM   2. Update all paths below to match your installation
+REM   3. Run: .\cmake_configure_vs17.cmd
+REM
+REM ==============================================================================
+
+@REM CMake configuration directories (point to lib\cmake\<PackageName>)
+set OIIO_DIR=<PATH_TO_OIIO_ROOT>\lib\cmake\OpenImageIO
+set IMATH_DIR=<PATH_TO_IMATH_ROOT>\lib\cmake\Imath
+set OPENEXR_DIR=<PATH_TO_OPENEXR_ROOT>\lib\cmake\OpenEXR
+set TIFF_DIR=<PATH_TO_LIBTIFF_ROOT>\lib\cmake\tiff
+
+@REM libjpeg-turbo (alternative to libjpeg)
+@REM set JPEG_TURBO_DIR=<PATH_TO_JPEG_TURBO_ROOT>\lib\cmake\libjpeg-turbo
+
+@REM libjpeg (if using libjpeg instead of libjpeg-turbo)
+set JPEG_ROOT=<PATH_TO_LIBJPEG_ROOT>
+set JPEG_INCLUDE_DIR=%JPEG_ROOT%\include
+set JPEG_LIBRARY=%JPEG_ROOT%\lib\libjpeg.lib
+
+@REM libpng
+set PNG_ROOT=<PATH_TO_LIBPNG_ROOT>
+set PNG_DIR=%PNG_ROOT%\lib\cmake\PNG
+set PNG_PNG_INCLUDE_DIR=%PNG_ROOT%\include
+set PNG_LIBRARY=%PNG_ROOT%\lib\libpng16_static.lib
+
+@REM zlib
+set ZLIB_ROOT=<PATH_TO_ZLIB_ROOT>
+set ZLIB_INCLUDE_DIR=%ZLIB_ROOT%\include
+set ZLIB_LIBRARY=%ZLIB_ROOT%\lib\zlibstatic.lib
+
+@REM ==============================================================================
+@REM Configure CMake
+@REM ==============================================================================
+
+cmake -S . -B .\build\ ^
+  -G "Visual Studio 17 2022" ^
+  -A x64 ^
+  -DBUILD_EXAMPLES=ON ^
+  -DUSE_OIIO=ON ^
+  -DOpenImageIO_DIR=%OIIO_DIR% ^
+  -DImath_DIR=%IMATH_DIR% ^
+  -DOpenEXR_DIR=%OPENEXR_DIR% ^
+  -DTIFF_DIR=%TIFF_DIR% ^
+  -DJPEG_INCLUDE_DIR=%JPEG_INCLUDE_DIR% ^
+  -DJPEG_LIBRARY=%JPEG_LIBRARY% ^
+  -DPNG_DIR=%PNG_DIR% ^
+  -DPNG_PNG_INCLUDE_DIR=%PNG_PNG_INCLUDE_DIR% ^
+  -DPNG_LIBRARY=%PNG_LIBRARY% ^
+  -DZLIB_INCLUDE_DIR=%ZLIB_INCLUDE_DIR% ^
+  -DZLIB_LIBRARY=%ZLIB_LIBRARY%
+
+@REM ==============================================================================
+@REM Path Configuration Examples
+@REM ==============================================================================
+@REM
+@REM Example 1: vcpkg installation
+@REM   set OIIO_DIR=C:\vcpkg\installed\x64-windows\share\OpenImageIO
+@REM   set IMATH_DIR=C:\vcpkg\installed\x64-windows\share\Imath
+@REM   set OPENEXR_DIR=C:\vcpkg\installed\x64-windows\share\OpenEXR
+@REM   ... (vcpkg handles most dependencies automatically)
+@REM
+@REM Example 2: Custom builds
+@REM   set OIIO_DIR=E:\libs\oiio\2.5.0\lib\cmake\OpenImageIO
+@REM   set IMATH_DIR=E:\libs\imath\3.1.10\lib\cmake\Imath
+@REM   set OPENEXR_DIR=E:\libs\openexr\3.3.4\lib\cmake\OpenEXR
+@REM   set TIFF_DIR=E:\libs\libtiff\4.7.0\lib\cmake\tiff
+@REM   set PNG_ROOT=E:\libs\libpng\1.6.47
+@REM   set ZLIB_ROOT=E:\libs\zlib\1.3.1
+@REM
+@REM Example 3: Conan installation
+@REM   (Typically conan generates a toolchain file, use that instead)
+@REM   cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake
+@REM
+@REM ==============================================================================
+@REM Dependency Overview
+@REM ==============================================================================
+@REM
+@REM OpenImageIO requires:
+@REM   - Imath (3.1+)          : Math library for half-float, vectors, etc.
+@REM   - OpenEXR (3.1+)        : EXR file format support
+@REM   - libtiff (4.0+)        : TIFF format support
+@REM   - libpng (1.6+)         : PNG format support
+@REM   - libjpeg or jpeg-turbo : JPEG format support
+@REM   - zlib (1.2+)           : Compression library
+@REM
+@REM Optional OIIO dependencies (not required for basic usage):
+@REM   - OpenColorIO, Boost, FFmpeg, Raw, WebP, etc.
+@REM
+@REM ==============================================================================
+@REM Troubleshooting
+@REM ==============================================================================
+@REM
+@REM Error: "find_package(OpenImageIO) not found"
+@REM   - Verify OIIO_DIR points to lib\cmake\OpenImageIO directory
+@REM   - Check that OpenImageIOConfig.cmake exists in that directory
+@REM
+@REM Error: "IMPORTED_LOCATION not set for target PNG::PNG"
+@REM   - Ensure PNG_ROOT points to installation root (not cmake config dir)
+@REM   - PNG_PNG_INCLUDE_DIR should be %PNG_ROOT%\include
+@REM   - PNG_LIBRARY should be %PNG_ROOT%\lib\libpng16_static.lib
+@REM
+@REM Error: "target OpenEXR::OpenEXR not found"
+@REM   - Add find_package(OpenEXR) before find_package(OpenImageIO) in CMakeLists.txt
+@REM   - Verify OPENEXR_DIR is correct
+@REM
+@REM Error: Linker errors about missing symbols
+@REM   - Ensure all _LIBRARY variables point to correct .lib files
+@REM   - Check that library build configurations match (Debug vs Release, static vs shared)
+@REM   - For static libraries, may need to add transitive dependencies
+@REM
+@REM ==============================================================================

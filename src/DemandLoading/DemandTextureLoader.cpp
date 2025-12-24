@@ -1,4 +1,4 @@
-#include "DemandTextureLoader.h"
+#include "DemandLoading/DemandTextureLoader.h"
 #include <algorithm>
 #include <mutex>
 #include <unordered_map>
@@ -8,6 +8,11 @@
 #include <atomic>
 #include <cstring>
 #include <cmath>
+
+#ifdef USE_OIIO
+#include "ImageSource/ImageSource.h"
+#include "ImageSource/OIIOReader.h"
+#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -28,8 +33,8 @@ const char* getErrorString(LoaderError error) {
     }
 }
 
-// Texture metadata
-struct TextureInfo {
+// Internal texture metadata (renamed to avoid conflict with ImageSource::TextureInfo)
+struct TextureMetadata {
     std::string filename;
     TextureDesc desc;
     hipTextureObject_t texObj = 0;
@@ -46,6 +51,11 @@ struct TextureInfo {
     bool hasMipmaps = false;
     std::unique_ptr<uint8_t[]> cachedData;  // For reload after eviction
     LoaderError lastError = LoaderError::Success;
+};
+
+struct RequestStats {
+    uint32_t count = 0;
+    uint32_t overflow = 0;
 };
 
 class DemandTextureLoader::Impl {
@@ -82,8 +92,8 @@ public:
             d_residentFlags_ = nullptr;
             return;
         }
-        
-        err = hipMalloc(&d_requestCount_, sizeof(uint32_t));
+
+        err = hipMalloc(&d_requestStats_, sizeof(RequestStats));
         if (err != hipSuccess) {
             lastError_ = LoaderError::OutOfMemory;
             hipFree(d_requests_);
@@ -94,20 +104,8 @@ public:
             d_residentFlags_ = nullptr;
             return;
         }
-        
-        err = hipMalloc(&d_requestOverflow_, sizeof(uint32_t));
-        if (err != hipSuccess) {
-            lastError_ = LoaderError::OutOfMemory;
-            hipFree(d_requestCount_);
-            hipFree(d_requests_);
-            hipFree(d_textures_);
-            hipFree(d_residentFlags_);
-            d_requestCount_ = nullptr;
-            d_requests_ = nullptr;
-            d_textures_ = nullptr;
-            d_residentFlags_ = nullptr;
-            return;
-        }
+        d_requestCount_ = reinterpret_cast<uint32_t*>(d_requestStats_);
+        d_requestOverflow_ = d_requestCount_ + 1;
         
         // Initialize to zero
         err = hipMemset(d_residentFlags_, 0, flagWords * sizeof(uint32_t));
@@ -116,28 +114,61 @@ public:
         err = hipMemset(d_textures_, 0, options_.maxTextures * sizeof(hipTextureObject_t));
         if (err != hipSuccess) lastError_ = LoaderError::HipError;
         
-        err = hipMemset(d_requestCount_, 0, sizeof(uint32_t));
+        err = hipMemset(d_requestStats_, 0, sizeof(RequestStats));
         if (err != hipSuccess) lastError_ = LoaderError::HipError;
         
-        err = hipMemset(d_requestOverflow_, 0, sizeof(uint32_t));
-        if (err != hipSuccess) lastError_ = LoaderError::HipError;
-        
-        // Allocate host buffers
-        h_residentFlags_.resize(flagWords, 0);
-        h_textures_.resize(options_.maxTextures, 0);
-        h_requests_.resize(options_.maxRequestsPerLaunch, 0);
-        
+        // Allocate host pinned buffers for async copies
+        flagWordCount_ = flagWords;
+        if (hipHostMalloc(reinterpret_cast<void**>(&h_residentFlags_), flagWords * sizeof(uint32_t)) != hipSuccess) {
+            lastError_ = LoaderError::OutOfMemory;
+            return;
+        }
+        if (hipHostMalloc(reinterpret_cast<void**>(&h_textures_), options_.maxTextures * sizeof(hipTextureObject_t)) != hipSuccess) {
+            lastError_ = LoaderError::OutOfMemory;
+            hipHostFree(h_residentFlags_);
+            h_residentFlags_ = nullptr;
+            return;
+        }
+        if (hipHostMalloc(reinterpret_cast<void**>(&h_requests_), options_.maxRequestsPerLaunch * sizeof(uint32_t)) != hipSuccess) {
+            lastError_ = LoaderError::OutOfMemory;
+            hipHostFree(h_residentFlags_);
+            hipHostFree(h_textures_);
+            h_residentFlags_ = nullptr;
+            h_textures_ = nullptr;
+            return;
+        }
+        if (hipHostMalloc(reinterpret_cast<void**>(&h_requestStats_), sizeof(RequestStats)) != hipSuccess) {
+            lastError_ = LoaderError::OutOfMemory;
+            hipHostFree(h_residentFlags_);
+            hipHostFree(h_textures_);
+            hipHostFree(h_requests_);
+            h_residentFlags_ = nullptr;
+            h_textures_ = nullptr;
+            h_requests_ = nullptr;
+            return;
+        }
+
+        std::fill_n(h_residentFlags_, flagWords, 0u);
+        std::fill_n(h_textures_, options_.maxTextures, static_cast<hipTextureObject_t>(0));
+        std::fill_n(h_requests_, options_.maxRequestsPerLaunch, 0u);
+        h_requestStats_->count = 0;
+        h_requestStats_->overflow = 0;
+
         textures_.resize(options_.maxTextures);
     }
     
     ~Impl() {
         unloadAll();
+
+        if (h_residentFlags_) hipHostFree(h_residentFlags_);
+        if (h_textures_) hipHostFree(h_textures_);
+        if (h_requests_) hipHostFree(h_requests_);
+        if (h_requestStats_) hipHostFree(h_requestStats_);
         
         if (d_residentFlags_) hipFree(d_residentFlags_);
         if (d_textures_) hipFree(d_textures_);
         if (d_requests_) hipFree(d_requests_);
-        if (d_requestCount_) hipFree(d_requestCount_);
-        if (d_requestOverflow_) hipFree(d_requestOverflow_);
+        if (d_requestStats_) hipFree(d_requestStats_);
     }
     
     TextureHandle createTexture(const std::string& filename, const TextureDesc& desc) {
@@ -150,12 +181,48 @@ public:
         
         uint32_t id = nextTextureId_++;
         
-        TextureInfo& info = textures_[id];
+        TextureMetadata& info = textures_[id];
         info.filename = filename;
         info.desc = desc;
         info.resident = false;
         
         // Try to get image dimensions without loading
+#ifdef USE_OIIO
+        // Try OIIO first for better format support
+        try {
+            std::unique_ptr<ImageSource> imgSrc = createImageSource(filename);
+            if (imgSrc) {
+                hip_demand::TextureInfo texInfo;
+                imgSrc->open(&texInfo);
+                if (imgSrc->isOpen()) {
+                    info.width = texInfo.width;
+                    info.height = texInfo.height;
+                    info.channels = 4;  // OIIO always converts to RGBA
+                    imgSrc->close();
+                } else {
+                    // Fall back to stb_image
+                    int w, h, c;
+                    if (stbi_info(filename.c_str(), &w, &h, &c)) {
+                        info.width = w;
+                        info.height = h;
+                        info.channels = c;
+                    } else {
+                        info.lastError = LoaderError::FileNotFound;
+                    }
+                }
+            }
+        } catch (...) {
+            // Fall back to stb_image on any exception
+            int w, h, c;
+            if (stbi_info(filename.c_str(), &w, &h, &c)) {
+                info.width = w;
+                info.height = h;
+                info.channels = c;
+            } else {
+                info.lastError = LoaderError::FileNotFound;
+            }
+        }
+#else
         int w, h, c;
         if (stbi_info(filename.c_str(), &w, &h, &c)) {
             info.width = w;
@@ -164,6 +231,7 @@ public:
         } else {
             info.lastError = LoaderError::FileNotFound;
         }
+#endif
         
         lastError_ = LoaderError::Success;
         return TextureHandle{id, true, info.width, info.height, info.channels, LoaderError::Success};
@@ -185,7 +253,7 @@ public:
         
         uint32_t id = nextTextureId_++;
         
-        TextureInfo& info = textures_[id];
+        TextureMetadata& info = textures_[id];
         info.filename = "";  // Memory-based texture
         info.desc = desc;
         info.width = width;
@@ -207,15 +275,15 @@ public:
         
         // Upload resident flags and texture array
         size_t flagWords = (options_.maxTextures + 31) / 32;
-        hipError_t err = hipMemcpyAsync(d_residentFlags_, h_residentFlags_.data(), 
-                      flagWords * sizeof(uint32_t), 
+        hipError_t err = hipMemcpyAsync(d_residentFlags_, h_residentFlags_, 
+                  flagWords * sizeof(uint32_t), 
                       hipMemcpyHostToDevice, stream);
         if (err != hipSuccess) {
             lastError_ = LoaderError::HipError;
             return;
         }
         
-        err = hipMemcpyAsync(d_textures_, h_textures_.data(), 
+        err = hipMemcpyAsync(d_textures_, h_textures_, 
                       options_.maxTextures * sizeof(hipTextureObject_t),
                       hipMemcpyHostToDevice, stream);
         if (err != hipSuccess) {
@@ -224,13 +292,7 @@ public:
         }
         
         // Reset request counter and overflow flag
-        err = hipMemsetAsync(d_requestCount_, 0, sizeof(uint32_t), stream);
-        if (err != hipSuccess) {
-            lastError_ = LoaderError::HipError;
-            return;
-        }
-        
-        err = hipMemsetAsync(d_requestOverflow_, 0, sizeof(uint32_t), stream);
+        err = hipMemsetAsync(d_requestStats_, 0, sizeof(RequestStats), stream);
         if (err != hipSuccess) {
             lastError_ = LoaderError::HipError;
             return;
@@ -252,17 +314,8 @@ public:
     }
     
     size_t processRequests(hipStream_t stream) {
-        // Download request count and overflow flag
-        uint32_t requestCount = 0;
-        uint32_t overflow = 0;
-        hipError_t err = hipMemcpyAsync(&requestCount, d_requestCount_, sizeof(uint32_t),
-                      hipMemcpyDeviceToHost, stream);
-        if (err != hipSuccess) {
-            lastError_ = LoaderError::HipError;
-            return 0;
-        }
-        
-        err = hipMemcpyAsync(&overflow, d_requestOverflow_, sizeof(uint32_t),
+        // Download request count and overflow flag in one transfer
+        hipError_t err = hipMemcpyAsync(h_requestStats_, d_requestStats_, sizeof(RequestStats),
                       hipMemcpyDeviceToHost, stream);
         if (err != hipSuccess) {
             lastError_ = LoaderError::HipError;
@@ -275,6 +328,8 @@ public:
             return 0;
         }
         
+        uint32_t requestCount = h_requestStats_->count;
+        uint32_t overflow = h_requestStats_->overflow;
         lastRequestOverflow_ = (overflow != 0);
         lastRequestCount_ = requestCount;
         
@@ -284,7 +339,7 @@ public:
         
         // Download requests
         requestCount = std::min(requestCount, (uint32_t)options_.maxRequestsPerLaunch);
-        err = hipMemcpyAsync(h_requests_.data(), d_requests_, 
+        err = hipMemcpyAsync(h_requests_, d_requests_, 
                       requestCount * sizeof(uint32_t),
                       hipMemcpyDeviceToHost, stream);
         if (err != hipSuccess) {
@@ -312,7 +367,7 @@ public:
                     if (uniqueRequests.insert(texId).second) {
                         toLoad.push_back(texId);
                         // Calculate actual memory needed
-                        const TextureInfo& info = textures_[texId];
+                        const TextureMetadata& info = textures_[texId];
                         int w = info.width;
                         int h = info.height;
                         if (w > 0 && h > 0) {
@@ -418,7 +473,6 @@ private:
     
     // Thread-safe texture loading wrapper
     bool loadTextureThreadSafe(uint32_t texId) {
-        std::lock_guard<std::mutex> lock(mutex_);
         return loadTexture(texId);
     }
     
@@ -480,37 +534,90 @@ private:
         return true;
     }
     bool loadTexture(uint32_t texId) {
-        TextureInfo& info = textures_[texId];
-        
+        std::unique_lock<std::mutex> lock(mutex_);
+        TextureMetadata& info = textures_[texId];
         if (info.resident || info.loading) {
             return false;
         }
-        
         info.loading = true;
-        
+        TextureDesc desc = info.desc;
+        std::string filename = info.filename;
+        int initWidth = info.width;
+        int initHeight = info.height;
+        int initChannels = info.channels;
+        const unsigned char* cachedPtr = info.cachedData.get();
+        bool hasCached = (cachedPtr != nullptr);
+        lock.unlock();
+
         // Load image data
         unsigned char* data = nullptr;
         bool needsFree = false;
-        int width, height, channels;
+        int width = initWidth;
+        int height = initHeight;
+        int channels = initChannels;
         
-        if (!info.filename.empty()) {
-            // Force 4 channels for consistency
-            data = stbi_load(info.filename.c_str(), &width, &height, &channels, 4);
-            if (!data) {
-                info.loading = false;
-                info.lastError = LoaderError::ImageLoadFailed;
-                return false;
+        if (!filename.empty()) {
+#ifdef USE_OIIO
+            // Try OIIO first for better format support
+            bool oiioSuccess = false;
+            try {
+                std::unique_ptr<ImageSource> imgSrc = createImageSource(filename);
+                if (imgSrc) {
+                    hip_demand::TextureInfo texInfo;
+                    imgSrc->open(&texInfo);
+                    if (imgSrc->isOpen()) {
+                        width = texInfo.width;
+                        height = texInfo.height;
+                        channels = 4;  // OIIO always provides RGBA
+                        
+                        // Allocate memory for base level
+                        size_t imageSize = width * height * 4;
+                        data = new unsigned char[imageSize];
+                        
+                        // Read base mip level
+                        if (imgSrc->readMipLevel(reinterpret_cast<char*>(data), 0, width, height)) {
+                            needsFree = true;
+                            oiioSuccess = true;
+                        } else {
+                            delete[] data;
+                            data = nullptr;
+                        }
+                        imgSrc->close();
+                    }
+                }
+            } catch (...) {
+                // Fall through to stb_image
+                if (data) {
+                    delete[] data;
+                    data = nullptr;
+                }
+                oiioSuccess = false;
             }
-            needsFree = true;
-            channels = 4;  // stbi_load forces 4 channels
-        } else if (info.cachedData) {
+            
+            // Fall back to stb_image if OIIO failed
+            if (!oiioSuccess) {
+#endif
+                // Force 4 channels for consistency
+                data = stbi_load(filename.c_str(), &width, &height, &channels, 4);
+                if (!data) {
+                    lock.lock();
+                    info.loading = false;
+                    info.lastError = LoaderError::ImageLoadFailed;
+                    return false;
+                }
+                needsFree = true;
+                channels = 4;  // stbi_load forces 4 channels
+#ifdef USE_OIIO
+            }
+#endif
+        } else if (hasCached) {
             // Use cached data - convert to 4 channels if needed
-            width = info.width;
-            height = info.height;
-            channels = info.channels;
+            width = initWidth;
+            height = initHeight;
+            channels = initChannels;
             
             if (channels == 4) {
-                data = info.cachedData.get();
+                data = const_cast<unsigned char*>(cachedPtr);
             } else {
                 // Convert to 4 channels
                 size_t pixelCount = width * height;
@@ -519,14 +626,14 @@ private:
                 
                 for (size_t i = 0; i < pixelCount; ++i) {
                     if (channels == 1) {
-                        data4[i*4+0] = info.cachedData[i];
-                        data4[i*4+1] = info.cachedData[i];
-                        data4[i*4+2] = info.cachedData[i];
+                        data4[i*4+0] = cachedPtr[i];
+                        data4[i*4+1] = cachedPtr[i];
+                        data4[i*4+2] = cachedPtr[i];
                         data4[i*4+3] = 255;
                     } else if (channels == 3) {
-                        data4[i*4+0] = info.cachedData[i*3+0];
-                        data4[i*4+1] = info.cachedData[i*3+1];
-                        data4[i*4+2] = info.cachedData[i*3+2];
+                        data4[i*4+0] = cachedPtr[i*3+0];
+                        data4[i*4+1] = cachedPtr[i*3+1];
+                        data4[i*4+2] = cachedPtr[i*3+2];
                         data4[i*4+3] = 255;
                     }
                 }
@@ -534,27 +641,28 @@ private:
                 channels = 4;
             }
         } else {
+            lock.lock();
             info.loading = false;
             info.lastError = LoaderError::InvalidParameter;
             return false;
         }
         
         // Update dimensions if not set
-        info.width = width;
-        info.height = height;
-        info.channels = channels;
+        int finalWidth = width;
+        int finalHeight = height;
+        int finalChannels = channels;
         
         hipError_t err;
         bool success = false;
         
         // Check if we should generate mipmaps
-        bool useMipmaps = info.desc.generateMipmaps && (width > 1 || height > 1);
+        bool useMipmaps = desc.generateMipmaps && (width > 1 || height > 1);
         
         if (useMipmaps) {
             // Create mipmapped array
             int numLevels = calculateMipLevels(width, height);
-            if (info.desc.maxMipLevel > 0) {
-                numLevels = std::min(numLevels, (int)info.desc.maxMipLevel);
+            if (desc.maxMipLevel > 0) {
+                numLevels = std::min(numLevels, (int)desc.maxMipLevel);
             }
             
             hipChannelFormatDesc channelDesc = hipCreateChannelDesc<uchar4>();
@@ -563,14 +671,15 @@ private:
             err = hipMallocMipmappedArray(&info.mipmapArray, &channelDesc, extent, numLevels);
             if (err != hipSuccess) {
                 if (needsFree) {
-                    if (!info.filename.empty()) {
+                    if (!filename.empty()) {
                         stbi_image_free(data);
                     } else {
                         delete[] data;
                     }
                 }
+                lock.lock();
                 info.loading = false;
-                info.lastError = LoaderError::HipError;
+                info.lastError = LoaderError::OutOfMemory;
                 return false;
             }
             
@@ -595,12 +704,12 @@ private:
                 
                 // Create texture descriptor
                 hipTextureDesc texDesc = {};
-                texDesc.addressMode[0] = info.desc.addressMode;
-                texDesc.addressMode[1] = info.desc.addressMode;
-                texDesc.filterMode = info.desc.filterMode;
+                texDesc.addressMode[0] = desc.addressMode;
+                texDesc.addressMode[1] = desc.addressMode;
+                texDesc.filterMode = desc.filterMode;
                 texDesc.readMode = hipReadModeNormalizedFloat;
-                texDesc.normalizedCoords = info.desc.normalizedCoords ? 1 : 0;
-                texDesc.sRGB = info.desc.sRGB ? 1 : 0;
+                texDesc.normalizedCoords = desc.normalizedCoords ? 1 : 0;
+                texDesc.sRGB = desc.sRGB ? 1 : 0;
                 texDesc.maxMipmapLevelClamp = numLevels - 1;
                 texDesc.minMipmapLevelClamp = 0;
                 texDesc.mipmapFilterMode = hipFilterModeLinear;
@@ -632,12 +741,12 @@ private:
                 
                 // Create texture descriptor
                 hipTextureDesc texDesc = {};
-                texDesc.addressMode[0] = info.desc.addressMode;
-                texDesc.addressMode[1] = info.desc.addressMode;
-                texDesc.filterMode = info.desc.filterMode;
+                texDesc.addressMode[0] = desc.addressMode;
+                texDesc.addressMode[1] = desc.addressMode;
+                texDesc.filterMode = desc.filterMode;
                 texDesc.readMode = hipReadModeNormalizedFloat;
-                texDesc.normalizedCoords = info.desc.normalizedCoords ? 1 : 0;
-                texDesc.sRGB = info.desc.sRGB ? 1 : 0;
+                texDesc.normalizedCoords = desc.normalizedCoords ? 1 : 0;
+                texDesc.sRGB = desc.sRGB ? 1 : 0;
                 
                 err = hipCreateTextureObject(&info.texObj, &resDesc, &texDesc, nullptr);
                 success = (err == hipSuccess);
@@ -652,7 +761,7 @@ private:
         
         // Free stbi data or converted data
         if (needsFree) {
-            if (!info.filename.empty()) {
+            if (!filename.empty()) {
                 stbi_image_free(data);
             } else {
                 delete[] data;
@@ -675,17 +784,21 @@ private:
                 }
                 info.array = nullptr;
             }
+            lock.lock();
             info.loading = false;
             info.lastError = LoaderError::HipError;
             return false;
         }
         
-        // Update host arrays
+        // Publish results under lock
+        lock.lock();
+        info.width = finalWidth;
+        info.height = finalHeight;
+        info.channels = finalChannels;
         h_textures_[texId] = info.texObj;
         uint32_t wordIdx = texId / 32;
         uint32_t bitIdx = texId % 32;
         h_residentFlags_[wordIdx] |= (1u << bitIdx);
-        
         info.resident = true;
         info.loading = false;
         info.lastUsedFrame = currentFrame_;
@@ -695,7 +808,7 @@ private:
     }
     
     void destroyTexture(uint32_t texId) {
-        TextureInfo& info = textures_[texId];
+        TextureMetadata& info = textures_[texId];
         
         if (!info.resident) return;
         
@@ -771,16 +884,19 @@ private:
     uint32_t* d_residentFlags_ = nullptr;
     hipTextureObject_t* d_textures_ = nullptr;
     uint32_t* d_requests_ = nullptr;
+    RequestStats* d_requestStats_ = nullptr;
     uint32_t* d_requestCount_ = nullptr;
     uint32_t* d_requestOverflow_ = nullptr;
     
-    // Host buffers
-    std::vector<uint32_t> h_residentFlags_;
-    std::vector<hipTextureObject_t> h_textures_;
-    std::vector<uint32_t> h_requests_;
+    // Host pinned buffers
+    uint32_t* h_residentFlags_ = nullptr;
+    hipTextureObject_t* h_textures_ = nullptr;
+    uint32_t* h_requests_ = nullptr;
+    RequestStats* h_requestStats_ = nullptr;
+    size_t flagWordCount_ = 0;
     
     // Texture storage
-    std::vector<TextureInfo> textures_;
+    std::vector<TextureMetadata> textures_;
     uint32_t nextTextureId_ = 0;
     uint32_t currentFrame_ = 0;
     size_t totalMemoryUsage_ = 0;

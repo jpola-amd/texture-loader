@@ -16,29 +16,72 @@
 - ✅ **Visual Studio 2022**: Full support via HIP Module API
 - ✅ **Error Handling**: Comprehensive HIP error checking on all API calls
 - ✅ **Request Overflow Detection**: Monitors and reports request buffer status
+- ✅ **Flexible Image Loading**: Built-in stb_image support with optional OpenImageIO for advanced formats (EXR, HDR, etc.)
 
 ## Quick Start
 
 ### Windows (Visual Studio 2022)
 
+**Using vcpkg (Recommended)**:
+```powershell
+# 1. Install vcpkg if you haven't already
+git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+cd C:\vcpkg
+.\bootstrap-vcpkg.bat
+.\vcpkg integrate install
+
+# 2. Install OpenImageIO (provides all dependencies)
+cd C:\vcpkg
+.\vcpkg install openimageio:x64-windows
+
+# 3. Build with vcpkg toolchain
+cd <your-project-dir>
+cmake -B build -S . -G "Visual Studio 17 2022" -A x64 `
+      -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+      -DBUILD_EXAMPLES=ON -DUSE_OIIO=ON
+cmake --build build --config Release
+.\build\Release\texture_loader_example.exe
+```
+
+**Basic Build (without OpenImageIO)**:
 ```powershell
 # Set HIP_PATH
 $env:HIP_PATH = "C:\Program Files\AMD\ROCm\6.4"
 
-# Build
+# Build (library only)
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 
-# Run example
+# Build with examples
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_EXAMPLES=ON
+cmake --build build --config Release
 .\build\Release\texture_loader_example.exe
+```
+
+**Advanced: Custom OpenImageIO Build**:
+```powershell
+# For manually built OIIO (copy and edit example script)
+Copy-Item cmake_configure_vs17_oiio.cmd.example cmake_configure_vs17.cmd
+# Edit cmake_configure_vs17.cmd with your paths
+.\cmake_configure_vs17.cmd
 ```
 
 ### Linux
 
 ```bash
+# Library only
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
+
+# With examples
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=ON
+cmake --build build
 ./build/texture_loader_example
+
+# With OpenImageIO
+sudo apt install libopenimageio-dev
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_OIIO=ON -DBUILD_EXAMPLES=ON
+cmake --build build
 ```
 
 See [BUILD.md](BUILD.md) for detailed build instructions.
@@ -95,8 +138,8 @@ See [BUILD.md](BUILD.md) for comprehensive build instructions including:
 ### Basic Example
 
 ```cpp
-#include "DemandTextureLoader.h"
-#include "TextureSampling.h"
+#include "DemandLoading/DemandTextureLoader.h"
+#include "DemandLoading/TextureSampling.h"
 
 // Create loader
 hip_demand::LoaderOptions options;
@@ -141,6 +184,33 @@ __global__ void myKernel(hip_demand::DeviceContext ctx, uint32_t texId) {
     }
 }
 ```
+
+### OpenImageIO Format Example
+
+When built with `-DUSE_OIIO=ON`, an additional example demonstrates advanced format support:
+
+```bash
+# Test various image formats
+.\build\Release\oiio_formats_example.exe texture.exr texture.hdr texture.tif
+
+# Example output:
+# ✓ OpenImageIO support ENABLED
+# Testing: texture.exr
+# Resolution:    2048 x 1024
+# Channels:      4
+# Mip Levels:    11
+# Pixel Format:  FLOAT32 (float)
+# Base Size:     8192 KB
+# ✓ Successfully read base mip level
+# Center pixel:  RGBA(128, 64, 32, 255)
+```
+
+See [examples/oiio_formats.cpp](examples/oiio_formats.cpp) for:
+- Loading EXR, HDR, TIFF 16/32-bit files
+- Format detection and statistics
+- Mip level access
+- Direct ImageSource API usage
+- DemandTextureLoader integration
 
 ## API Reference
 
@@ -204,7 +274,7 @@ struct TextureDesc {
 ### Device-Side API
 
 ```cpp
-#include "TextureSampling.h"
+#include "DemandLoading/TextureSampling.h"
 
 __global__ void myKernel(hip_demand::DeviceContext ctx, uint32_t texId) {
     float u = ..., v = ...;
@@ -293,6 +363,38 @@ Mipmaps increase memory by ~33% but significantly improve rendering quality.
 - LRU eviction manages memory
 - Standard HIP texture objects
 - Works on all AMD GPUs with HIP support
+
+### Image Loading Backends
+
+The loader supports two image loading backends:
+
+**Built-in (stb_image)**:
+- Default backend, always available
+- Supports: PNG, JPG, BMP, TGA, PSD, GIF
+- Lightweight, no external dependencies
+- UINT8 format only
+
+**Optional (OpenImageIO)**:
+- Enable with `-DUSE_OIIO=ON` during CMake configuration
+- Supports: EXR, HDR, TIFF (16/32-bit), and 100+ formats
+- Production-grade format handling
+- Automatic format detection and conversion
+- Thread-safe with statistics tracking
+- Used automatically when available, falls back to stb_image
+
+```bash
+# Build with OpenImageIO support
+cmake -S . -B build -DUSE_OIIO=ON
+cmake --build build
+```
+
+**When to use OpenImageIO**:
+- HDR/EXR workflows (VFX, film production)
+- 16/32-bit per channel textures
+- Advanced format requirements
+- Professional production pipelines
+
+The loader automatically tries OIIO first (if enabled), then falls back to stb_image if OIIO fails or isn't available.
 
 ### Visual Studio 2022 Support
 

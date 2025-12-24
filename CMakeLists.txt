@@ -22,6 +22,7 @@ set(STB_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/stb" CACHE PATH "Path 
 
 # Build options
 option(BUILD_EXAMPLES "Build example applications" OFF)
+option(USE_OIIO "Use OpenImageIO for image loading" OFF)
 
 # GPU architectures to compile for
 set(HIP_ARCHITECTURES "" CACHE STRING "GPU architectures to compile for (semicolon-separated)")
@@ -32,13 +33,26 @@ else()
     message(STATUS "Using custom HIP architectures: ${HIP_ARCHITECTURES}")
 endif()
 
+# Find OpenImageIO if requested
+if(USE_OIIO)
+    find_package(Imath REQUIRED)
+    find_package(OpenEXR REQUIRED)
+    find_package(OpenImageIO REQUIRED)
+    message(STATUS "Using OpenImageIO for image loading")
+endif()
+
 # Library
-add_library(hip_demand_texture
-    src/DemandTextureLoader.cpp
-    src/TextureRegistry.cpp
-    src/ImageReader.cpp
-    src/RequestBuffer.cpp
+set(TEXTURE_LOADER_SOURCES
+    src/DemandLoading/DemandTextureLoader.cpp
 )
+
+if(USE_OIIO)
+    list(APPEND TEXTURE_LOADER_SOURCES
+        src/ImageSource/OIIOReader.cpp
+    )
+endif()
+
+add_library(hip_demand_texture ${TEXTURE_LOADER_SOURCES})
 
 target_include_directories(hip_demand_texture
     PUBLIC
@@ -55,6 +69,12 @@ target_link_libraries(hip_demand_texture
 
 target_compile_definitions(hip_demand_texture PRIVATE __HIP_PLATFORM_AMD__)
 
+# Add OpenImageIO support if enabled
+if(USE_OIIO)
+    target_compile_definitions(hip_demand_texture PRIVATE USE_OIIO)
+    target_link_libraries(hip_demand_texture PRIVATE OpenImageIO::OpenImageIO)
+endif()
+
 # Examples (optional)
 if(BUILD_EXAMPLES)
     # Compile HIP kernel to code object
@@ -62,7 +82,15 @@ if(BUILD_EXAMPLES)
         TARGET render_kernel
         SOURCES examples/simple_render_kernel.hip
         ARCHITECTURES ${HIP_ARCHITECTURES}
-        OPTIONS -O3 --std=c++17
+            OPTIONS -O3 --std=c++17 -DHIP_ENABLE_WARP_SYNC_BUILTINS
+        INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
+    hip_add_executable(
+        TARGET tiled_render_kernel
+        SOURCES examples/tiled_render_kernel.hip
+        ARCHITECTURES ${HIP_ARCHITECTURES}
+            OPTIONS -O3 --std=c++17 -DHIP_ENABLE_WARP_SYNC_BUILTINS
         INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
 
@@ -71,7 +99,17 @@ if(BUILD_EXAMPLES)
         examples/simple_render.cpp
     )
 
+    add_executable(tiled_render_example
+        examples/tiled_render.cpp
+    )
+
     target_include_directories(texture_loader_example
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${STB_INCLUDE_DIR}
+    )
+
+    target_include_directories(tiled_render_example
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${STB_INCLUDE_DIR}
@@ -83,6 +121,12 @@ if(BUILD_EXAMPLES)
     )
     target_compile_definitions(texture_loader_example PRIVATE __HIP_PLATFORM_AMD__)
 
+    target_link_libraries(tiled_render_example
+        PRIVATE
+            hip_demand_texture
+    )
+    target_compile_definitions(tiled_render_example PRIVATE __HIP_PLATFORM_AMD__)
+
     # Copy kernel code object to output directory
     add_custom_command(TARGET texture_loader_example POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -91,8 +135,37 @@ if(BUILD_EXAMPLES)
         COMMENT "Copying HIP kernel code object"
     )
 
+    add_custom_command(TARGET tiled_render_example POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_PROPERTY:tiled_render_kernel,HIP_CODE_OBJECT>
+            $<TARGET_FILE_DIR:tiled_render_example>/tiled_render_kernel.co
+        COMMENT "Copying HIP kernel code object"
+    )
+
     # Add dependency to ensure kernel is built first
     add_dependencies(texture_loader_example render_kernel)
+    add_dependencies(tiled_render_example tiled_render_kernel)
+    
+    # OpenImageIO format example (only if OIIO is enabled)
+    if(USE_OIIO)
+        add_executable(oiio_formats_example
+            examples/oiio_formats.cpp
+        )
+        
+        target_include_directories(oiio_formats_example
+            PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        
+        target_link_libraries(oiio_formats_example
+            PRIVATE
+                hip_demand_texture
+        )
+        
+        target_compile_definitions(oiio_formats_example PRIVATE __HIP_PLATFORM_AMD__ USE_OIIO)
+        
+        message(STATUS "Building OpenImageIO format example")
+    endif()
 endif()
 
 # Installation
