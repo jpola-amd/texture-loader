@@ -50,3 +50,5 @@ cmake_configure_*.cmd
 # OS
 .DS_Store
 Thumbs.db
+
+install/
