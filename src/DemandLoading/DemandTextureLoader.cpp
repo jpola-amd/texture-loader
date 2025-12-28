@@ -394,8 +394,9 @@ public:
             }
             logMessage(LogLevel::Debug, "processRequests: unique-to-load=%zu estMem=%.2f MB", toLoad.size(), static_cast<double>(estimatedMemoryNeeded) / (1024.0 * 1024.0));
             
-            // Check if we need eviction (with actual size estimates)
-            if (options_.enableEviction && estimatedMemoryNeeded > 0) {
+            // Check if we need eviction (with actual size estimates). A maxTextureMemory of 0 means
+            // "no budget", so skip eviction entirely in that case.
+            if (options_.enableEviction && options_.maxTextureMemory > 0 && estimatedMemoryNeeded > 0) {
                 evictIfNeeded(estimatedMemoryNeeded);
             }
         }
@@ -872,6 +873,11 @@ private:
     }
     
     void evictIfNeeded(size_t requiredMemory) {
+        // A budget of 0 means unlimited; never evict.
+        if (options_.maxTextureMemory == 0) {
+            return;
+        }
+
         // Check if we need to free space
         if (totalMemoryUsage_ + requiredMemory <= options_.maxTextureMemory) {
             return;
