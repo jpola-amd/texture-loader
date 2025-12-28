@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstring>
 #include <cmath>
+#include <limits>
 
 #ifdef USE_OIIO
 #include "ImageSource/ImageSource.h"
@@ -68,6 +69,10 @@ public:
             lastError_ = LoaderError::HipError;
             return;
         }
+
+        // Dedicated stream for request-buffer readback. This enables overlap with the render stream
+        // when the app queues further work after calling processRequestsAsync().
+        hipStreamCreateWithFlags(&requestCopyStream_, hipStreamNonBlocking);
         
         // Allocate device buffers
         size_t flagWords = (options_.maxTextures + 31) / 32;
@@ -160,10 +165,26 @@ public:
         h_requestStats_->count = 0;
         h_requestStats_->overflow = 0;
 
+        // First launchPrepare must upload the entire state.
+        markAllDirty();
+
         textures_.resize(options_.maxTextures);
     }
     
     ~Impl() {
+        // Ensure any async request-processing tasks complete before we start tearing down
+        // resources they might touch (e.g., mutex_, textures_, options_, logging).
+        destroying_.store(true, std::memory_order_release);
+        {
+            std::unique_lock<std::mutex> lock(asyncMutex_);
+            asyncCv_.wait(lock, [&] { return inFlightAsync_.load(std::memory_order_acquire) == 0; });
+        }
+
+        if (requestCopyStream_) {
+            hipStreamDestroy(requestCopyStream_);
+            requestCopyStream_ = nullptr;
+        }
+
         unloadAll();
 
         if (h_residentFlags_) hipHostFree(h_residentFlags_);
@@ -284,26 +305,66 @@ public:
     
     void launchPrepare(hipStream_t stream) {
         std::lock_guard<std::mutex> lock(mutex_);
-        
-        // Upload resident flags and texture array
-        size_t flagWords = (options_.maxTextures + 31) / 32;
-        hipError_t err = hipMemcpyAsync(deviceContext_.residentFlags, h_residentFlags_, 
-                  flagWords * sizeof(uint32_t), 
-                      hipMemcpyHostToDevice, stream);
-        if (err != hipSuccess) {
-            lastError_ = LoaderError::HipError;
-            logMessage(LogLevel::Error, "launchPrepare: hipMemcpyAsync(residentFlags) failed: %s", hipGetErrorString(err));
-            return;
+
+        // Upload only dirty ranges for resident flags and texture objects.
+        // Pinned host memory makes these memcpyAsync operations cheap to enqueue.
+        hipError_t err = hipSuccess;
+
+        if (residentFlagsDirty_ || texturesDirty_) {
+            size_t residentWords = 0;
+            size_t textureCount = 0;
+            if (residentFlagsDirty_ && dirtyResidentWordBegin_ != std::numeric_limits<size_t>::max() && dirtyResidentWordBegin_ <= dirtyResidentWordEnd_) {
+                residentWords = (dirtyResidentWordEnd_ - dirtyResidentWordBegin_ + 1);
+            }
+            if (texturesDirty_ && dirtyTextureBegin_ != std::numeric_limits<size_t>::max() && dirtyTextureBegin_ <= dirtyTextureEnd_) {
+                textureCount = (dirtyTextureEnd_ - dirtyTextureBegin_ + 1);
+            }
+            logMessage(LogLevel::Debug,
+                       "launchPrepare: dirty residentWords=%zu (%.1f KB) textures=%zu (%.1f KB)",
+                       residentWords,
+                       static_cast<double>(residentWords * sizeof(uint32_t)) / 1024.0,
+                       textureCount,
+                       static_cast<double>(textureCount * sizeof(hipTextureObject_t)) / 1024.0);
         }
-        
-        err = hipMemcpyAsync(deviceContext_.textures, h_textures_, 
-                      options_.maxTextures * sizeof(hipTextureObject_t),
-                      hipMemcpyHostToDevice, stream);
-        if (err != hipSuccess) {
-            lastError_ = LoaderError::HipError;
-            logMessage(LogLevel::Error, "launchPrepare: hipMemcpyAsync(textures) failed: %s", hipGetErrorString(err));
-            return;
+
+        if (residentFlagsDirty_) {
+            const size_t begin = dirtyResidentWordBegin_;
+            const size_t end = dirtyResidentWordEnd_;
+            if (begin < flagWordCount_ && begin <= end) {
+                const size_t countWords = std::min(flagWordCount_ - begin, end - begin + 1);
+                err = hipMemcpyAsync(deviceContext_.residentFlags + begin,
+                                     h_residentFlags_ + begin,
+                                     countWords * sizeof(uint32_t),
+                                     hipMemcpyHostToDevice,
+                                     stream);
+                if (err != hipSuccess) {
+                    lastError_ = LoaderError::HipError;
+                    logMessage(LogLevel::Error, "launchPrepare: hipMemcpyAsync(residentFlags dirty) failed: %s", hipGetErrorString(err));
+                    return;
+                }
+            }
         }
+
+        if (texturesDirty_) {
+            const size_t begin = dirtyTextureBegin_;
+            const size_t end = dirtyTextureEnd_;
+            if (begin < options_.maxTextures && begin <= end) {
+                const size_t count = std::min(options_.maxTextures - begin, end - begin + 1);
+                err = hipMemcpyAsync(deviceContext_.textures + begin,
+                                     h_textures_ + begin,
+                                     count * sizeof(hipTextureObject_t),
+                                     hipMemcpyHostToDevice,
+                                     stream);
+                if (err != hipSuccess) {
+                    lastError_ = LoaderError::HipError;
+                    logMessage(LogLevel::Error, "launchPrepare: hipMemcpyAsync(textures dirty) failed: %s", hipGetErrorString(err));
+                    return;
+                }
+            }
+        }
+
+        // Mark the current state as uploaded (further changes will re-dirty under the same mutex).
+        clearDirtyLocked();
         
         // Reset request counter and overflow flag
         err = hipMemsetAsync(d_requestStats_, 0, sizeof(RequestStats), stream);
@@ -325,6 +386,8 @@ public:
         uint32_t requestCount = 0;
         uint32_t overflow = 0;
 
+        const uint32_t copyCount = std::min<uint32_t>(static_cast<uint32_t>(options_.maxRequestsPerLaunch), deviceContext.maxRequests);
+
         hipError_t err = hipMemcpyAsync(&requestCount, deviceContext.requestCount, sizeof(uint32_t),
                                          hipMemcpyDeviceToHost, stream);
         if (err != hipSuccess) {
@@ -338,6 +401,15 @@ public:
             lastError_ = LoaderError::HipError;
             return 0;
         }
+
+        // Copy the full request list up-front so we only need one stream sync.
+        err = hipMemcpyAsync(h_requests_, deviceContext.requests,
+                             copyCount * sizeof(uint32_t),
+                             hipMemcpyDeviceToHost, stream);
+        if (err != hipSuccess) {
+            lastError_ = LoaderError::HipError;
+            return 0;
+        }
         
         err = hipStreamSynchronize(stream);
         if (err != hipSuccess) {
@@ -345,8 +417,8 @@ public:
             return 0;
         }
         
-        lastRequestOverflow_ = (overflow != 0);
-        lastRequestCount_ = requestCount;
+        lastRequestOverflow_.store(overflow != 0, std::memory_order_release);
+        lastRequestCount_.store(static_cast<size_t>(requestCount), std::memory_order_release);
         if (overflow) {
             logMessage(LogLevel::Warn, "processRequests: overflow flagged (count=%u, cap=%zu)", requestCount, static_cast<size_t>(options_.maxRequestsPerLaunch));
         }
@@ -356,54 +428,108 @@ public:
             return 0;
         }
         
-        requestCount = std::min(requestCount, std::min<uint32_t>(options_.maxRequestsPerLaunch, deviceContext.maxRequests));
-        err = hipMemcpyAsync(h_requests_, deviceContext.requests,
-                             requestCount * sizeof(uint32_t),
-                             hipMemcpyDeviceToHost, stream);
-        if (err != hipSuccess) {
-            lastError_ = LoaderError::HipError;
-            return 0;
-        }
-        
-        err = hipStreamSynchronize(stream);
-        if (err != hipSuccess) {
-            lastError_ = LoaderError::HipError;
-            return 0;
-        }
-
-        return processRequestsHost(requestCount);
+        requestCount = std::min(requestCount, copyCount);
+        return processRequestsHost(requestCount, h_requests_);
     }
 
     Ticket processRequestsAsync(hipStream_t stream, const DeviceContext& deviceContext) {
-        hipError_t err = hipMemcpyAsync(&h_requestStats_->count, deviceContext.requestCount, sizeof(uint32_t),
-                                        hipMemcpyDeviceToHost, stream);
+        if (destroying_.load(std::memory_order_acquire)) {
+            return Ticket{};
+        }
+
+        // Allocate per-ticket pinned buffers to avoid races if multiple tickets are in-flight.
+        auto makePinned = [](size_t bytes) -> std::shared_ptr<void> {
+            void* ptr = nullptr;
+            if (hipHostMalloc(&ptr, bytes) != hipSuccess) {
+                return {};
+            }
+            return std::shared_ptr<void>(ptr, [](void* p) { hipHostFree(p); });
+        };
+
+        auto statsPinnedBase = makePinned(sizeof(RequestStats));
+        auto requestsPinnedBase = makePinned(options_.maxRequestsPerLaunch * sizeof(uint32_t));
+        if (!statsPinnedBase || !requestsPinnedBase) {
+            lastError_ = LoaderError::OutOfMemory;
+            return Ticket{};
+        }
+        auto* statsPinned = static_cast<RequestStats*>(statsPinnedBase.get());
+        auto* requestsPinned = static_cast<uint32_t*>(requestsPinnedBase.get());
+
+        statsPinned->count = 0;
+        statsPinned->overflow = 0;
+
+        const uint32_t copyCount = std::min<uint32_t>(static_cast<uint32_t>(options_.maxRequestsPerLaunch), deviceContext.maxRequests);
+
+        // Capture a dependency point on the render stream so the copy stream doesn't race the kernel.
+        hipEvent_t depsReady{};
+        if (hipEventCreateWithFlags(&depsReady, hipEventDisableTiming) != hipSuccess) {
+            lastError_ = LoaderError::HipError;
+            return Ticket{};
+        }
+        hipEventRecord(depsReady, stream);
+
+        hipStream_t copyStream = requestCopyStream_ ? requestCopyStream_ : stream;
+        if (copyStream != stream) {
+            hipError_t waitErr = hipStreamWaitEvent(copyStream, depsReady, 0);
+            if (waitErr != hipSuccess) {
+                hipEventDestroy(depsReady);
+                lastError_ = LoaderError::HipError;
+                return Ticket{};
+            }
+        }
+
+        hipError_t err = hipMemcpyAsync(&statsPinned->count, deviceContext.requestCount, sizeof(uint32_t),
+                                        hipMemcpyDeviceToHost, copyStream);
         if (err != hipSuccess) {
             lastError_ = LoaderError::HipError;
             return Ticket{};
         }
 
-        err = hipMemcpyAsync(&h_requestStats_->overflow, deviceContext.requestOverflow, sizeof(uint32_t),
-                             hipMemcpyDeviceToHost, stream);
+        err = hipMemcpyAsync(&statsPinned->overflow, deviceContext.requestOverflow, sizeof(uint32_t),
+                             hipMemcpyDeviceToHost, copyStream);
         if (err != hipSuccess) {
             lastError_ = LoaderError::HipError;
             return Ticket{};
         }
 
-        hipEvent_t statsReady{};
-        if (hipEventCreate(&statsReady) != hipSuccess) {
+        err = hipMemcpyAsync(requestsPinned, deviceContext.requests,
+                             copyCount * sizeof(uint32_t),
+                             hipMemcpyDeviceToHost, copyStream);
+        if (err != hipSuccess) {
             lastError_ = LoaderError::HipError;
             return Ticket{};
         }
-        hipEventRecord(statsReady, stream);
 
-        auto task = [this, deviceContext, statsReady]() {
-            hipEventSynchronize(statsReady);
-            hipEventDestroy(statsReady);
+        hipEvent_t copyDone{};
+        if (hipEventCreateWithFlags(&copyDone, hipEventDisableTiming) != hipSuccess) {
+            lastError_ = LoaderError::HipError;
+            return Ticket{};
+        }
+        hipEventRecord(copyDone, copyStream);
 
-            uint32_t requestCount = h_requestStats_->count;
-            uint32_t overflow = h_requestStats_->overflow;
-            lastRequestOverflow_ = (overflow != 0);
-            lastRequestCount_ = requestCount;
+        inFlightAsync_.fetch_add(1, std::memory_order_acq_rel);
+
+        auto task = [this, deviceContext, depsReady, copyDone, copyCount, statsPinnedBase, requestsPinnedBase]() {
+            struct InFlightGuard {
+                DemandTextureLoader::Impl* self;
+                ~InFlightGuard() {
+                    self->inFlightAsync_.fetch_sub(1, std::memory_order_acq_rel);
+                    std::lock_guard<std::mutex> lock(self->asyncMutex_);
+                    self->asyncCv_.notify_all();
+                }
+            } guard{this};
+
+            hipEventSynchronize(copyDone);
+            hipEventDestroy(copyDone);
+            hipEventDestroy(depsReady);
+
+            auto* statsPinned = static_cast<RequestStats*>(statsPinnedBase.get());
+            auto* requestsPinned = static_cast<uint32_t*>(requestsPinnedBase.get());
+
+            uint32_t requestCount = statsPinned->count;
+            uint32_t overflow = statsPinned->overflow;
+            lastRequestOverflow_.store(overflow != 0, std::memory_order_release);
+            lastRequestCount_.store(static_cast<size_t>(requestCount), std::memory_order_release);
             if (overflow) {
                 logMessage(LogLevel::Warn, "processRequestsAsync: overflow flagged (count=%u, cap=%zu)", requestCount, static_cast<size_t>(options_.maxRequestsPerLaunch));
             }
@@ -411,16 +537,8 @@ public:
                 return;
             }
 
-            requestCount = std::min(requestCount, std::min<uint32_t>(options_.maxRequestsPerLaunch, deviceContext.maxRequests));
-
-            hipError_t copyErr = hipMemcpy(h_requests_, deviceContext.requests,
-                                           requestCount * sizeof(uint32_t), hipMemcpyDeviceToHost);
-            if (copyErr != hipSuccess) {
-                lastError_ = LoaderError::HipError;
-                return;
-            }
-
-            processRequestsHost(requestCount);
+            requestCount = std::min(requestCount, copyCount);
+            processRequestsHost(requestCount, requestsPinned);
         };
 
         auto impl = createTicketImpl(std::move(task), stream);
@@ -442,11 +560,11 @@ public:
     }
     
     size_t getRequestCount() const {
-        return lastRequestCount_;
+        return lastRequestCount_.load(std::memory_order_acquire);
     }
     
     bool hadRequestOverflow() const {
-        return lastRequestOverflow_;
+        return lastRequestOverflow_.load(std::memory_order_acquire);
     }
     
     LoaderError getLastError() const {
@@ -481,6 +599,40 @@ public:
     }
     
 private:
+    void markAllDirty() {
+        // Requires mutex_ held by caller.
+        residentFlagsDirty_ = true;
+        texturesDirty_ = true;
+        dirtyResidentWordBegin_ = 0;
+        dirtyResidentWordEnd_ = flagWordCount_ ? (flagWordCount_ - 1) : 0;
+        dirtyTextureBegin_ = 0;
+        dirtyTextureEnd_ = options_.maxTextures ? (options_.maxTextures - 1) : 0;
+    }
+
+    void clearDirtyLocked() {
+        // Requires mutex_ held by caller.
+        residentFlagsDirty_ = false;
+        texturesDirty_ = false;
+        dirtyResidentWordBegin_ = std::numeric_limits<size_t>::max();
+        dirtyResidentWordEnd_ = 0;
+        dirtyTextureBegin_ = std::numeric_limits<size_t>::max();
+        dirtyTextureEnd_ = 0;
+    }
+
+    void markTextureDirtyLocked(uint32_t texId) {
+        // Requires mutex_ held by caller.
+        texturesDirty_ = true;
+        dirtyTextureBegin_ = std::min(dirtyTextureBegin_, static_cast<size_t>(texId));
+        dirtyTextureEnd_ = std::max(dirtyTextureEnd_, static_cast<size_t>(texId));
+    }
+
+    void markResidentWordDirtyLocked(uint32_t wordIdx) {
+        // Requires mutex_ held by caller.
+        residentFlagsDirty_ = true;
+        dirtyResidentWordBegin_ = std::min(dirtyResidentWordBegin_, static_cast<size_t>(wordIdx));
+        dirtyResidentWordEnd_ = std::max(dirtyResidentWordEnd_, static_cast<size_t>(wordIdx));
+    }
+
     // Calculate total memory needed for mipmaps
     size_t calculateMipmapMemory(int width, int height, int bytesPerPixel) const {
         size_t total = 0;
@@ -508,7 +660,7 @@ private:
         return loadTexture(texId);
     }
 
-    size_t processRequestsHost(uint32_t requestCount) {
+    size_t processRequestsHost(uint32_t requestCount, const uint32_t* requests) {
         // Deduplicate requests and gather texture info under lock
         std::unordered_set<uint32_t> uniqueRequests;
         std::vector<uint32_t> toLoad;
@@ -518,7 +670,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
 
             for (size_t i = 0; i < requestCount; ++i) {
-                uint32_t texId = h_requests_[i];
+                uint32_t texId = requests[i];
                 if (texId < nextTextureId_ && !textures_[texId].resident) {
                     if (uniqueRequests.insert(texId).second) {
                         toLoad.push_back(texId);
@@ -879,6 +1031,8 @@ private:
         uint32_t wordIdx = texId / 32;
         uint32_t bitIdx = texId % 32;
         h_residentFlags_[wordIdx] |= (1u << bitIdx);
+        markTextureDirtyLocked(texId);
+        markResidentWordDirtyLocked(wordIdx);
         info.resident = true;
         info.loading = false;
         info.lastUsedFrame = currentFrame_;
@@ -926,6 +1080,10 @@ private:
         uint32_t wordIdx = texId / 32;
         uint32_t bitIdx = texId % 32;
         h_residentFlags_[wordIdx] &= ~(1u << bitIdx);
+
+        // Mark dirty so the next launchPrepare updates device-side state.
+        markTextureDirtyLocked(texId);
+        markResidentWordDirtyLocked(wordIdx);
         
         logMessage(LogLevel::Debug, "destroyTexture: evicted texId=%u freed=%.2f MB", texId, static_cast<double>(info.memoryUsage) / (1024.0 * 1024.0));
         totalMemoryUsage_ -= info.memoryUsage;
@@ -972,6 +1130,8 @@ private:
     // Device context with all device pointers
     DeviceContext deviceContext_{};
     RequestStats* d_requestStats_ = nullptr;  // For allocation management
+
+    hipStream_t requestCopyStream_ = nullptr;
     
     // Host pinned buffers
     uint32_t* h_residentFlags_ = nullptr;
@@ -979,6 +1139,14 @@ private:
     uint32_t* h_requests_ = nullptr;
     RequestStats* h_requestStats_ = nullptr;
     size_t flagWordCount_ = 0;
+
+    // Dirty tracking for deviceContext_ updates (requires mutex_).
+    bool residentFlagsDirty_ = false;
+    bool texturesDirty_ = false;
+    size_t dirtyResidentWordBegin_ = std::numeric_limits<size_t>::max();
+    size_t dirtyResidentWordEnd_ = 0;
+    size_t dirtyTextureBegin_ = std::numeric_limits<size_t>::max();
+    size_t dirtyTextureEnd_ = 0;
     
     // Texture storage
     std::vector<TextureMetadata> textures_;
@@ -987,8 +1155,13 @@ private:
     size_t totalMemoryUsage_ = 0;
     
     // Statistics
-    size_t lastRequestCount_ = 0;
-    bool lastRequestOverflow_ = false;
+    std::atomic<size_t> lastRequestCount_{0};
+    std::atomic<bool> lastRequestOverflow_{false};
+
+    std::atomic<int> inFlightAsync_{0};
+    std::atomic<bool> destroying_{false};
+    mutable std::mutex asyncMutex_;
+    mutable std::condition_variable asyncCv_;
     LoaderError lastError_ = LoaderError::Success;
 };
 

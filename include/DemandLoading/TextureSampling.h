@@ -22,8 +22,10 @@ __device__ __forceinline__ bool isTextureResident(const DeviceContext& ctx, uint
 
 // Record a texture request; use warp-level dedup where supported, otherwise per-thread atomics.
 __device__ __forceinline__ void recordTextureRequest(const DeviceContext& ctx, uint32_t texId) {
-    // If overflow already flagged, skip atomics to reduce contention
-    if (atomicAdd(ctx.requestOverflow, 0u) != 0u) return;
+    // If overflow already flagged, skip atomics to reduce contention.
+    // This is a best-effort early-out; using a volatile load is sufficient here.
+    const volatile uint32_t* overflowPtr = reinterpret_cast<volatile uint32_t*>(ctx.requestOverflow);
+    if (*overflowPtr != 0u) return;
 
 #if defined(HIP_ENABLE_WARP_SYNC_BUILTINS)
     // Warp-level deduplication: only the leader for a given texId appends

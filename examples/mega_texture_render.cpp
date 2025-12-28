@@ -1,4 +1,5 @@
 #include "DemandLoading/DemandTextureLoader.h"
+#include "DemandLoading/Logging.h"
 #include <hip/hip_runtime.h>
 #include <iostream>
 #include <vector>
@@ -97,6 +98,7 @@ int main() {
     options.maxRequestsPerLaunch = 1920 * 1080;
     options.enableEviction = true;
 
+    hip_demand::setLogLevel(hip_demand::LogLevel::Debug);
     hip_demand::DemandTextureLoader loader(options);
 
     const int texSize = 8192;

@@ -236,6 +236,41 @@ if(BUILD_EXAMPLES)
     add_dependencies(atlas_render_example atlas_render_kernel)
     add_dependencies(async_vs_sync_example render_kernel)
     
+    # Benchmark suite
+    hip_add_executable(
+        TARGET benchmark_kernel
+        SOURCES examples/benchmark_kernel.hip
+        ARCHITECTURES ${HIP_ARCHITECTURES}
+            OPTIONS -O3 --std=c++17 -DHIP_ENABLE_WARP_SYNC_BUILTINS
+        INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    
+    add_executable(benchmark_suite
+        examples/benchmark_suite.cpp
+    )
+    
+    target_include_directories(benchmark_suite
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    
+    target_link_libraries(benchmark_suite
+        PRIVATE
+            hip_demand_texture
+            hip::host
+    )
+    
+    target_compile_definitions(benchmark_suite PRIVATE __HIP_PLATFORM_AMD__)
+    
+    add_custom_command(TARGET benchmark_suite POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_PROPERTY:benchmark_kernel,HIP_CODE_OBJECT>
+            $<TARGET_FILE_DIR:benchmark_suite>/benchmark_kernel.co
+        COMMENT "Copying HIP kernel code object"
+    )
+    
+    add_dependencies(benchmark_suite benchmark_kernel)
+    
     # OpenImageIO format example (only if OIIO is enabled)
     if(USE_OIIO)
         add_executable(oiio_formats_example
