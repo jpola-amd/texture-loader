@@ -155,9 +155,11 @@ int main() {
 
         hipStreamSynchronize(stream);
 
-        size_t loaded = loader.processRequests(stream);
+        auto ticket = loader.processRequestsAsync(stream);
+        ticket.wait();
+        size_t loaded = loader.getRequestCount();
         totalLoaded += loaded;
-        std::cout << "Pass " << (pass + 1) << ": " << loaded << " loaded, resident="
+        std::cout << "Pass " << (pass + 1) << ": " << loaded << " requests processed, resident="
                   << loader.getResidentTextureCount() << " mem="
                   << (loader.getTotalTextureMemory() / (1024*1024)) << "MB";
         if (loader.hadRequestOverflow()) std::cout << " (overflow)";

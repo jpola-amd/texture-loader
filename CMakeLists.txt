@@ -44,6 +44,7 @@ endif()
 # Library
 set(TEXTURE_LOADER_SOURCES
     src/DemandLoading/DemandTextureLoader.cpp
+    src/DemandLoading/Ticket.cpp
     src/DemandLoading/Logging.cpp
 )
 
@@ -128,6 +129,10 @@ if(BUILD_EXAMPLES)
         examples/atlas_render.cpp
     )
 
+    add_executable(async_vs_sync_example
+        examples/async_vs_sync.cpp
+    )
+
     target_include_directories(texture_loader_example
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -147,6 +152,12 @@ if(BUILD_EXAMPLES)
     )
 
     target_include_directories(atlas_render_example
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${STB_INCLUDE_DIR}
+    )
+
+    target_include_directories(async_vs_sync_example
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${STB_INCLUDE_DIR}
@@ -175,6 +186,12 @@ if(BUILD_EXAMPLES)
             hip_demand_texture
     )
     target_compile_definitions(atlas_render_example PRIVATE __HIP_PLATFORM_AMD__)
+
+    target_link_libraries(async_vs_sync_example
+        PRIVATE
+            hip_demand_texture
+    )
+    target_compile_definitions(async_vs_sync_example PRIVATE __HIP_PLATFORM_AMD__)
 
     # Copy kernel code object to output directory
     add_custom_command(TARGET texture_loader_example POST_BUILD
@@ -205,11 +222,19 @@ if(BUILD_EXAMPLES)
         COMMENT "Copying HIP kernel code object"
     )
 
+    add_custom_command(TARGET async_vs_sync_example POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_PROPERTY:render_kernel,HIP_CODE_OBJECT>
+            $<TARGET_FILE_DIR:async_vs_sync_example>/render_kernel.co
+        COMMENT "Copying HIP kernel code object"
+    )
+
     # Add dependency to ensure kernel is built first
     add_dependencies(texture_loader_example render_kernel)
     add_dependencies(tiled_render_example tiled_render_kernel)
     add_dependencies(mega_texture_example mega_texture_kernel)
     add_dependencies(atlas_render_example atlas_render_kernel)
+    add_dependencies(async_vs_sync_example render_kernel)
     
     # OpenImageIO format example (only if OIIO is enabled)
     if(USE_OIIO)

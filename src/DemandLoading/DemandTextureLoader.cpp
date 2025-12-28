@@ -1,5 +1,6 @@
 #include "DemandLoading/DemandTextureLoader.h"
 #include "DemandLoading/Logging.h"
+#include "DemandLoading/Ticket.h"
 #include <algorithm>
 #include <mutex>
 #include <unordered_map>
@@ -367,49 +368,56 @@ public:
             lastError_ = LoaderError::HipError;
             return 0;
         }
-        
-        // Deduplicate requests and gather texture info under lock
-        std::unordered_set<uint32_t> uniqueRequests;
-        std::vector<uint32_t> toLoad;
-        size_t estimatedMemoryNeeded = 0;
-        
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            
-            for (size_t i = 0; i < requestCount; ++i) {
-                uint32_t texId = h_requests_[i];
-                if (texId < nextTextureId_ && !textures_[texId].resident) {
-                    if (uniqueRequests.insert(texId).second) {
-                        toLoad.push_back(texId);
-                        // Calculate actual memory needed
-                        const TextureMetadata& info = textures_[texId];
-                        int w = info.width;
-                        int h = info.height;
-                        if (w > 0 && h > 0) {
-                            size_t mipMemory = calculateMipmapMemory(w, h, 4);
-                            estimatedMemoryNeeded += mipMemory;
-                        }
-                    }
-                }
-            }
-            logMessage(LogLevel::Debug, "processRequests: unique-to-load=%zu estMem=%.2f MB", toLoad.size(), static_cast<double>(estimatedMemoryNeeded) / (1024.0 * 1024.0));
-            
-            // Check if we need eviction (with actual size estimates). A maxTextureMemory of 0 means
-            // "no budget", so skip eviction entirely in that case.
-            if (options_.enableEviction && options_.maxTextureMemory > 0 && estimatedMemoryNeeded > 0) {
-                evictIfNeeded(estimatedMemoryNeeded);
-            }
+
+        return processRequestsHost(requestCount);
+    }
+
+    Ticket processRequestsAsync(hipStream_t stream) {
+        // Stage 1: copy request stats async
+        hipError_t err = hipMemcpyAsync(h_requestStats_, d_requestStats_, sizeof(RequestStats),
+                                        hipMemcpyDeviceToHost, stream);
+        if (err != hipSuccess) {
+            lastError_ = LoaderError::HipError;
+            return Ticket{};
         }
-        
-        // Load textures outside the lock to allow concurrency
-        size_t loaded = 0;
-        for (uint32_t texId : toLoad) {
-            if (loadTextureThreadSafe(texId)) {
-                loaded++;
-            }
+
+        hipEvent_t statsReady{};
+        if (hipEventCreate(&statsReady) != hipSuccess) {
+            lastError_ = LoaderError::HipError;
+            return Ticket{};
         }
-        
-        return loaded;
+        hipEventRecord(statsReady, stream);
+
+        auto task = [this, stream, statsReady]() {
+            // Wait for device->host stats copy to complete
+            hipEventSynchronize(statsReady);
+            hipEventDestroy(statsReady);
+
+            uint32_t requestCount = h_requestStats_->count;
+            uint32_t overflow = h_requestStats_->overflow;
+            lastRequestOverflow_ = (overflow != 0);
+            lastRequestCount_ = requestCount;
+            if (overflow) {
+                logMessage(LogLevel::Warn, "processRequestsAsync: overflow flagged (count=%u, cap=%zu)", requestCount, static_cast<size_t>(options_.maxRequestsPerLaunch));
+            }
+            if (requestCount == 0) {
+                return;
+            }
+
+            requestCount = std::min(requestCount, static_cast<uint32_t>(options_.maxRequestsPerLaunch));
+
+            // Blocking copy of the requests buffer now that count is known
+            hipError_t copyErr = hipMemcpy(h_requests_, d_requests_, requestCount * sizeof(uint32_t), hipMemcpyDeviceToHost);
+            if (copyErr != hipSuccess) {
+                lastError_ = LoaderError::HipError;
+                return;
+            }
+
+            processRequestsHost(requestCount);
+        };
+
+        auto impl = createTicketImpl(std::move(task), stream);
+        return Ticket(std::move(impl));
     }
     
     size_t getResidentTextureCount() const {
@@ -491,6 +499,51 @@ private:
     // Thread-safe texture loading wrapper
     bool loadTextureThreadSafe(uint32_t texId) {
         return loadTexture(texId);
+    }
+
+    size_t processRequestsHost(uint32_t requestCount) {
+        // Deduplicate requests and gather texture info under lock
+        std::unordered_set<uint32_t> uniqueRequests;
+        std::vector<uint32_t> toLoad;
+        size_t estimatedMemoryNeeded = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+
+            for (size_t i = 0; i < requestCount; ++i) {
+                uint32_t texId = h_requests_[i];
+                if (texId < nextTextureId_ && !textures_[texId].resident) {
+                    if (uniqueRequests.insert(texId).second) {
+                        toLoad.push_back(texId);
+                        // Calculate actual memory needed
+                        const TextureMetadata& info = textures_[texId];
+                        int w = info.width;
+                        int h = info.height;
+                        if (w > 0 && h > 0) {
+                            size_t mipMemory = calculateMipmapMemory(w, h, 4);
+                            estimatedMemoryNeeded += mipMemory;
+                        }
+                    }
+                }
+            }
+            logMessage(LogLevel::Debug, "processRequests: unique-to-load=%zu estMem=%.2f MB", toLoad.size(), static_cast<double>(estimatedMemoryNeeded) / (1024.0 * 1024.0));
+
+            // Check if we need eviction (with actual size estimates). A maxTextureMemory of 0 means
+            // "no budget", so skip eviction entirely in that case.
+            if (options_.enableEviction && options_.maxTextureMemory > 0 && estimatedMemoryNeeded > 0) {
+                evictIfNeeded(estimatedMemoryNeeded);
+            }
+        }
+
+        // Load textures outside the lock to allow concurrency
+        size_t loaded = 0;
+        for (uint32_t texId : toLoad) {
+            if (loadTextureThreadSafe(texId)) {
+                loaded++;
+            }
+        }
+
+        return loaded;
     }
     
     // Generate mipmap levels using simple box filter
@@ -963,6 +1016,10 @@ DeviceContext DemandTextureLoader::getDeviceContext() const {
 
 size_t DemandTextureLoader::processRequests(hipStream_t stream) {
     return impl_->processRequests(stream);
+}
+
+Ticket DemandTextureLoader::processRequestsAsync(hipStream_t stream) {
+    return impl_->processRequestsAsync(stream);
 }
 
 size_t DemandTextureLoader::getResidentTextureCount() const {

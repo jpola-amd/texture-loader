@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DemandLoading/DeviceContext.h"
+#include "DemandLoading/Ticket.h"
 #include <hip/hip_runtime.h>
 #include <string>
 #include <memory>
@@ -96,6 +97,10 @@ public:
     // Process texture requests after kernel launch
     // Returns number of textures loaded
     size_t processRequests(hipStream_t stream = 0);
+
+    // Asynchronously process texture requests on a background thread and return a Ticket that can
+    // be waited on. Uses the provided stream for any device copies performed during processing.
+    Ticket processRequestsAsync(hipStream_t stream = 0);
 
     // Statistics
     size_t getResidentTextureCount() const;
