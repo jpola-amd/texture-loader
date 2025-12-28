@@ -40,12 +40,30 @@ static void generateMegaTexture(const char* filename, int size, float hueShift) 
         for (int x = 0; x < size; ++x) {
             float fx = static_cast<float>(x) / static_cast<float>(size);
             int idx = (y * size + x) * 4;
-            float swirl = 0.5f + 0.5f * std::sin(6.28318f * (fx * 4.0f + fy * 2.0f + hueShift));
-            float grad = 0.5f + 0.5f * fx;
-            float band = 0.5f + 0.5f * std::cos(6.28318f * (fy * 3.0f + hueShift * 0.5f));
-            data[idx + 0] = static_cast<uint8_t>(255.0f * swirl);
-            data[idx + 1] = static_cast<uint8_t>(255.0f * grad);
-            data[idx + 2] = static_cast<uint8_t>(255.0f * band);
+            // Rotate and phase-shift per texture so A/B/C look different
+            float angle = hueShift * 2.3f;
+            float ca = std::cos(angle);
+            float sa = std::sin(angle);
+            float rx = fx * ca - fy * sa;
+            float ry = fx * sa + fy * ca;
+
+            float swirl = 0.5f + 0.5f * std::sin(6.28318f * (rx * 3.0f + ry * 1.5f) + hueShift * 3.7f);
+            float grad = 0.4f + 0.6f * fx;
+            float band = 0.5f + 0.5f * std::cos(6.28318f * (ry * 2.4f + rx * 1.1f) + hueShift * 5.1f);
+            float radial = std::sqrt((fx - 0.5f) * (fx - 0.5f) + (fy - 0.5f) * (fy - 0.5f));
+            float vignette = 1.0f - std::min(radial * 1.4f, 1.0f);
+
+            float r = 0.55f * swirl + 0.45f * vignette;
+            float g = 0.5f * band + 0.5f * grad;
+            float b = 0.6f * (1.0f - band * 0.5f) + 0.4f * std::sin(6.28318f * (radial * 3.0f + hueShift));
+
+            r = fminf(fmaxf(r, 0.0f), 1.0f);
+            g = fminf(fmaxf(g, 0.0f), 1.0f);
+            b = fminf(fmaxf(b, 0.0f), 1.0f);
+
+            data[idx + 0] = static_cast<uint8_t>(255.0f * r);
+            data[idx + 1] = static_cast<uint8_t>(255.0f * g);
+            data[idx + 2] = static_cast<uint8_t>(255.0f * b);
             data[idx + 3] = 255;
         }
     }
@@ -105,7 +123,9 @@ int main() {
             }
         } else {
             std::cout << "Generating mega texture (" << filename << ")...\n";
-            generateMegaTexture(filename, texSize, static_cast<float>(i));
+            // Use non-integer phase offsets so textures A/B/C are visually distinct
+            float hueShift = static_cast<float>(i) * 0.37f;
+            generateMegaTexture(filename, texSize, hueShift);
             handle = loader.createTexture(filename, desc);
         }
 
@@ -159,7 +179,7 @@ int main() {
 
         hipStreamSynchronize(stream);
 
-        auto ticket = loader.processRequestsAsync(stream);
+        auto ticket = loader.processRequestsAsync(stream, ctx);
         ticket.wait();
         size_t loaded = loader.getRequestCount();
         totalLoaded += loaded;

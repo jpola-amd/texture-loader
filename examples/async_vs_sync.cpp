@@ -130,11 +130,11 @@ int main() {
 
             size_t loaded = 0;
             if (useAsync) {
-                auto ticket = loader.processRequestsAsync(stream);
+                auto ticket = loader.processRequestsAsync(stream, ctx);
                 ticket.wait();
                 loaded = loader.getRequestCount();
             } else {
-                loaded = loader.processRequests(stream);
+                loaded = loader.processRequests(stream, ctx);
             }
             totalLoaded += loaded;
 

@@ -71,53 +71,57 @@ public:
         
         // Allocate device buffers
         size_t flagWords = (options_.maxTextures + 31) / 32;
-        err = hipMalloc(&d_residentFlags_, flagWords * sizeof(uint32_t));
+        err = hipMalloc(&deviceContext_.residentFlags, flagWords * sizeof(uint32_t));
         if (err != hipSuccess) {
             lastError_ = LoaderError::OutOfMemory;
             return;
         }
         
-        err = hipMalloc(&d_textures_, options_.maxTextures * sizeof(hipTextureObject_t));
+        err = hipMalloc(&deviceContext_.textures, options_.maxTextures * sizeof(hipTextureObject_t));
         if (err != hipSuccess) {
             lastError_ = LoaderError::OutOfMemory;
-            hipFree(d_residentFlags_);
-            d_residentFlags_ = nullptr;
+            hipFree(deviceContext_.residentFlags);
+            deviceContext_.residentFlags = nullptr;
             return;
         }
         
-        err = hipMalloc(&d_requests_, options_.maxRequestsPerLaunch * sizeof(uint32_t));
+        err = hipMalloc(&deviceContext_.requests, options_.maxRequestsPerLaunch * sizeof(uint32_t));
         if (err != hipSuccess) {
             lastError_ = LoaderError::OutOfMemory;
-            hipFree(d_textures_);
-            hipFree(d_residentFlags_);
-            d_textures_ = nullptr;
-            d_residentFlags_ = nullptr;
+            hipFree(deviceContext_.textures);
+            hipFree(deviceContext_.residentFlags);
+            deviceContext_.textures = nullptr;
+            deviceContext_.residentFlags = nullptr;
             return;
         }
 
         err = hipMalloc(&d_requestStats_, sizeof(RequestStats));
         if (err != hipSuccess) {
             lastError_ = LoaderError::OutOfMemory;
-            hipFree(d_requests_);
-            hipFree(d_textures_);
-            hipFree(d_residentFlags_);
-            d_requests_ = nullptr;
-            d_textures_ = nullptr;
-            d_residentFlags_ = nullptr;
+            hipFree(deviceContext_.requests);
+            hipFree(deviceContext_.textures);
+            hipFree(deviceContext_.residentFlags);
+            deviceContext_.requests = nullptr;
+            deviceContext_.textures = nullptr;
+            deviceContext_.residentFlags = nullptr;
             return;
         }
-        d_requestCount_ = reinterpret_cast<uint32_t*>(d_requestStats_);
-        d_requestOverflow_ = d_requestCount_ + 1;
+        deviceContext_.requestCount = reinterpret_cast<uint32_t*>(d_requestStats_);
+        deviceContext_.requestOverflow = deviceContext_.requestCount + 1;
         
         // Initialize to zero
-        err = hipMemset(d_residentFlags_, 0, flagWords * sizeof(uint32_t));
+        err = hipMemset(deviceContext_.residentFlags, 0, flagWords * sizeof(uint32_t));
         if (err != hipSuccess) lastError_ = LoaderError::HipError;
         
-        err = hipMemset(d_textures_, 0, options_.maxTextures * sizeof(hipTextureObject_t));
+        err = hipMemset(deviceContext_.textures, 0, options_.maxTextures * sizeof(hipTextureObject_t));
         if (err != hipSuccess) lastError_ = LoaderError::HipError;
         
         err = hipMemset(d_requestStats_, 0, sizeof(RequestStats));
         if (err != hipSuccess) lastError_ = LoaderError::HipError;
+        
+        // Set limits
+        deviceContext_.maxTextures = options_.maxTextures;
+        deviceContext_.maxRequests = options_.maxRequestsPerLaunch;
         
         // Allocate host pinned buffers for async copies
         flagWordCount_ = flagWords;
@@ -167,9 +171,9 @@ public:
         if (h_requests_) hipHostFree(h_requests_);
         if (h_requestStats_) hipHostFree(h_requestStats_);
         
-        if (d_residentFlags_) hipFree(d_residentFlags_);
-        if (d_textures_) hipFree(d_textures_);
-        if (d_requests_) hipFree(d_requests_);
+        if (deviceContext_.residentFlags) hipFree(deviceContext_.residentFlags);
+        if (deviceContext_.textures) hipFree(deviceContext_.textures);
+        if (deviceContext_.requests) hipFree(deviceContext_.requests);
         if (d_requestStats_) hipFree(d_requestStats_);
     }
     
@@ -283,7 +287,7 @@ public:
         
         // Upload resident flags and texture array
         size_t flagWords = (options_.maxTextures + 31) / 32;
-        hipError_t err = hipMemcpyAsync(d_residentFlags_, h_residentFlags_, 
+        hipError_t err = hipMemcpyAsync(deviceContext_.residentFlags, h_residentFlags_, 
                   flagWords * sizeof(uint32_t), 
                       hipMemcpyHostToDevice, stream);
         if (err != hipSuccess) {
@@ -292,7 +296,7 @@ public:
             return;
         }
         
-        err = hipMemcpyAsync(d_textures_, h_textures_, 
+        err = hipMemcpyAsync(deviceContext_.textures, h_textures_, 
                       options_.maxTextures * sizeof(hipTextureObject_t),
                       hipMemcpyHostToDevice, stream);
         if (err != hipSuccess) {
@@ -314,21 +318,22 @@ public:
     }
     
     DeviceContext getDeviceContext() const {
-        DeviceContext ctx;
-        ctx.residentFlags = d_residentFlags_;
-        ctx.textures = d_textures_;
-        ctx.requests = d_requests_;
-        ctx.requestCount = d_requestCount_;
-        ctx.requestOverflow = d_requestOverflow_;
-        ctx.maxTextures = options_.maxTextures;
-        ctx.maxRequests = options_.maxRequestsPerLaunch;
-        return ctx;
+        return deviceContext_;
     }
     
-    size_t processRequests(hipStream_t stream) {
-        // Download request count and overflow flag in one transfer
-        hipError_t err = hipMemcpyAsync(h_requestStats_, d_requestStats_, sizeof(RequestStats),
-                      hipMemcpyDeviceToHost, stream);
+    size_t processRequests(hipStream_t stream, const DeviceContext& deviceContext) {
+        uint32_t requestCount = 0;
+        uint32_t overflow = 0;
+
+        hipError_t err = hipMemcpyAsync(&requestCount, deviceContext.requestCount, sizeof(uint32_t),
+                                         hipMemcpyDeviceToHost, stream);
+        if (err != hipSuccess) {
+            lastError_ = LoaderError::HipError;
+            return 0;
+        }
+
+        err = hipMemcpyAsync(&overflow, deviceContext.requestOverflow, sizeof(uint32_t),
+                             hipMemcpyDeviceToHost, stream);
         if (err != hipSuccess) {
             lastError_ = LoaderError::HipError;
             return 0;
@@ -340,8 +345,6 @@ public:
             return 0;
         }
         
-        uint32_t requestCount = h_requestStats_->count;
-        uint32_t overflow = h_requestStats_->overflow;
         lastRequestOverflow_ = (overflow != 0);
         lastRequestCount_ = requestCount;
         if (overflow) {
@@ -353,11 +356,10 @@ public:
             return 0;
         }
         
-        // Download requests
-        requestCount = std::min(requestCount, (uint32_t)options_.maxRequestsPerLaunch);
-        err = hipMemcpyAsync(h_requests_, d_requests_, 
-                      requestCount * sizeof(uint32_t),
-                      hipMemcpyDeviceToHost, stream);
+        requestCount = std::min(requestCount, std::min<uint32_t>(options_.maxRequestsPerLaunch, deviceContext.maxRequests));
+        err = hipMemcpyAsync(h_requests_, deviceContext.requests,
+                             requestCount * sizeof(uint32_t),
+                             hipMemcpyDeviceToHost, stream);
         if (err != hipSuccess) {
             lastError_ = LoaderError::HipError;
             return 0;
@@ -372,10 +374,16 @@ public:
         return processRequestsHost(requestCount);
     }
 
-    Ticket processRequestsAsync(hipStream_t stream) {
-        // Stage 1: copy request stats async
-        hipError_t err = hipMemcpyAsync(h_requestStats_, d_requestStats_, sizeof(RequestStats),
+    Ticket processRequestsAsync(hipStream_t stream, const DeviceContext& deviceContext) {
+        hipError_t err = hipMemcpyAsync(&h_requestStats_->count, deviceContext.requestCount, sizeof(uint32_t),
                                         hipMemcpyDeviceToHost, stream);
+        if (err != hipSuccess) {
+            lastError_ = LoaderError::HipError;
+            return Ticket{};
+        }
+
+        err = hipMemcpyAsync(&h_requestStats_->overflow, deviceContext.requestOverflow, sizeof(uint32_t),
+                             hipMemcpyDeviceToHost, stream);
         if (err != hipSuccess) {
             lastError_ = LoaderError::HipError;
             return Ticket{};
@@ -388,8 +396,7 @@ public:
         }
         hipEventRecord(statsReady, stream);
 
-        auto task = [this, stream, statsReady]() {
-            // Wait for device->host stats copy to complete
+        auto task = [this, deviceContext, statsReady]() {
             hipEventSynchronize(statsReady);
             hipEventDestroy(statsReady);
 
@@ -404,10 +411,10 @@ public:
                 return;
             }
 
-            requestCount = std::min(requestCount, static_cast<uint32_t>(options_.maxRequestsPerLaunch));
+            requestCount = std::min(requestCount, std::min<uint32_t>(options_.maxRequestsPerLaunch, deviceContext.maxRequests));
 
-            // Blocking copy of the requests buffer now that count is known
-            hipError_t copyErr = hipMemcpy(h_requests_, d_requests_, requestCount * sizeof(uint32_t), hipMemcpyDeviceToHost);
+            hipError_t copyErr = hipMemcpy(h_requests_, deviceContext.requests,
+                                           requestCount * sizeof(uint32_t), hipMemcpyDeviceToHost);
             if (copyErr != hipSuccess) {
                 lastError_ = LoaderError::HipError;
                 return;
@@ -962,13 +969,9 @@ private:
     int device_;
     std::mutex mutable mutex_;
     
-    // Device pointers
-    uint32_t* d_residentFlags_ = nullptr;
-    hipTextureObject_t* d_textures_ = nullptr;
-    uint32_t* d_requests_ = nullptr;
-    RequestStats* d_requestStats_ = nullptr;
-    uint32_t* d_requestCount_ = nullptr;
-    uint32_t* d_requestOverflow_ = nullptr;
+    // Device context with all device pointers
+    DeviceContext deviceContext_{};
+    RequestStats* d_requestStats_ = nullptr;  // For allocation management
     
     // Host pinned buffers
     uint32_t* h_residentFlags_ = nullptr;
@@ -1014,12 +1017,12 @@ DeviceContext DemandTextureLoader::getDeviceContext() const {
     return impl_->getDeviceContext();
 }
 
-size_t DemandTextureLoader::processRequests(hipStream_t stream) {
-    return impl_->processRequests(stream);
+size_t DemandTextureLoader::processRequests(hipStream_t stream, const DeviceContext& deviceContext) {
+    return impl_->processRequests(stream, deviceContext);
 }
 
-Ticket DemandTextureLoader::processRequestsAsync(hipStream_t stream) {
-    return impl_->processRequestsAsync(stream);
+Ticket DemandTextureLoader::processRequestsAsync(hipStream_t stream, const DeviceContext& deviceContext) {
+    return impl_->processRequestsAsync(stream, deviceContext);
 }
 
 size_t DemandTextureLoader::getResidentTextureCount() const {

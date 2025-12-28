@@ -177,7 +177,7 @@ int main(int argc, char** argv) {
 
         hipStreamSynchronize(stream);
 
-        auto ticket = loader.processRequestsAsync(stream);
+        auto ticket = loader.processRequestsAsync(stream, ctx);
         ticket.wait();
         size_t loaded = loader.getRequestCount();
         totalLoaded += loaded;

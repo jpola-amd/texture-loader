@@ -158,7 +158,7 @@ int main() {
         hipStreamSynchronize(stream);
 
         // Async process of texture requests
-        auto ticket = loader.processRequestsAsync(stream);
+        auto ticket = loader.processRequestsAsync(stream, ctx);
         ticket.wait();
         size_t requests = loader.getRequestCount();
         std::cout << "Pass " << (pass + 1) << ": " << requests << " requests processed, resident="

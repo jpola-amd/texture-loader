@@ -94,13 +94,13 @@ public:
     // Get device context to pass to kernel
     DeviceContext getDeviceContext() const;
 
-    // Process texture requests after kernel launch
+    // Process texture requests after kernel launch using the provided device context
     // Returns number of textures loaded
-    size_t processRequests(hipStream_t stream = 0);
+    size_t processRequests(hipStream_t stream, const DeviceContext& deviceContext);
 
-    // Asynchronously process texture requests on a background thread and return a Ticket that can
-    // be waited on. Uses the provided stream for any device copies performed during processing.
-    Ticket processRequestsAsync(hipStream_t stream = 0);
+    // Asynchronously process texture requests on a background thread using the provided device context and stream.
+    // Returns a Ticket that can be waited on.
+    Ticket processRequestsAsync(hipStream_t stream, const DeviceContext& deviceContext);
 
     // Statistics
     size_t getResidentTextureCount() const;
