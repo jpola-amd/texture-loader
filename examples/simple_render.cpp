@@ -111,7 +111,8 @@ int main(int argc, char** argv) {
         // Reuse existing textures if present in the current directory
         if (fs::exists(filename)) {
             hip_demand::TextureDesc desc;
-            desc.addressMode = hipAddressModeWrap;
+            desc.addressMode[0] = hipAddressModeWrap;
+            desc.addressMode[1] = hipAddressModeWrap;
             desc.filterMode = hipFilterModeLinear;
             desc.generateMipmaps = true;
             handle = loader.createTexture(filename, desc);
@@ -135,7 +136,8 @@ int main(int argc, char** argv) {
             std::cout << "  Saved: " << filename << " (" << size << "x" << size << ")\n";
 
             hip_demand::TextureDesc desc;
-            desc.addressMode = hipAddressModeWrap;
+            desc.addressMode[0] = hipAddressModeWrap;
+            desc.addressMode[1] = hipAddressModeWrap;
             desc.filterMode = hipFilterModeLinear;
             desc.generateMipmaps = true;  // Enable mipmaps for better quality
 

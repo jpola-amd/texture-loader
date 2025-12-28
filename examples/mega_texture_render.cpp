@@ -90,7 +90,8 @@ int main() {
 
     std::vector<hip_demand::TextureHandle> handles;
     hip_demand::TextureDesc desc;
-    desc.addressMode = hipAddressModeWrap;
+    desc.addressMode[0] = hipAddressModeWrap;
+    desc.addressMode[1] = hipAddressModeWrap;
     desc.filterMode = hipFilterModeLinear;
     desc.generateMipmaps = true;
 

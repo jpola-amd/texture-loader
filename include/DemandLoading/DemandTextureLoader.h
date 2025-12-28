@@ -39,13 +39,25 @@ struct LoaderOptions {
 
 // Texture descriptor
 struct TextureDesc {
-    hipTextureAddressMode addressMode = hipAddressModeWrap;
+    hipTextureAddressMode addressMode[2] = {hipAddressModeWrap, hipAddressModeWrap};
     hipTextureFilterMode filterMode = hipFilterModeLinear;
+    hipTextureFilterMode mipmapFilterMode = hipFilterModeLinear;
     bool normalizedCoords = true;
     bool sRGB = false;
     bool generateMipmaps = true;  // Generate mipmaps for better quality
     unsigned int maxMipLevel = 0;  // 0 = auto-generate all levels
 };
+
+inline bool operator==(const TextureDesc& a, const TextureDesc& b) {
+    return (a.addressMode[0] == b.addressMode[0] &&
+            a.addressMode[1] == b.addressMode[1] &&
+            a.filterMode == b.filterMode &&
+            a.mipmapFilterMode == b.mipmapFilterMode &&
+            a.normalizedCoords == b.normalizedCoords &&
+            a.sRGB == b.sRGB &&
+            a.generateMipmaps == b.generateMipmaps &&
+            a.maxMipLevel == b.maxMipLevel);
+}
 
 // Texture information returned after creation
 struct TextureHandle {

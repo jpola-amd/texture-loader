@@ -71,7 +71,8 @@ int main() {
 
         if (fs::exists(filename)) {
             hip_demand::TextureDesc desc;
-            desc.addressMode = hipAddressModeWrap;
+            desc.addressMode[0] = hipAddressModeWrap;
+            desc.addressMode[1] = hipAddressModeWrap;
             desc.filterMode = hipFilterModeLinear;
             desc.generateMipmaps = true;
             handle = loader.createTexture(filename, desc);
@@ -92,7 +93,8 @@ int main() {
             stbi_write_png(filename, size, size, 4, data.data(), size * 4);
 
             hip_demand::TextureDesc desc;
-            desc.addressMode = hipAddressModeWrap;
+            desc.addressMode[0] = hipAddressModeWrap;
+            desc.addressMode[1] = hipAddressModeWrap;
             desc.filterMode = hipFilterModeLinear;
             desc.generateMipmaps = true;
 

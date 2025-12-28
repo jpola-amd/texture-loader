@@ -722,8 +722,8 @@ private:
                 
                 // Create texture descriptor
                 hipTextureDesc texDesc = {};
-                texDesc.addressMode[0] = desc.addressMode;
-                texDesc.addressMode[1] = desc.addressMode;
+                texDesc.addressMode[0] = desc.addressMode[0];
+                texDesc.addressMode[1] = desc.addressMode[1];
                 texDesc.filterMode = desc.filterMode;
                 texDesc.readMode = hipReadModeNormalizedFloat;
                 texDesc.normalizedCoords = desc.normalizedCoords ? 1 : 0;
@@ -759,8 +759,8 @@ private:
                 
                 // Create texture descriptor
                 hipTextureDesc texDesc = {};
-                texDesc.addressMode[0] = desc.addressMode;
-                texDesc.addressMode[1] = desc.addressMode;
+                texDesc.addressMode[0] = desc.addressMode[0];
+                texDesc.addressMode[1] = desc.addressMode[1];
                 texDesc.filterMode = desc.filterMode;
                 texDesc.readMode = hipReadModeNormalizedFloat;
                 texDesc.normalizedCoords = desc.normalizedCoords ? 1 : 0;
