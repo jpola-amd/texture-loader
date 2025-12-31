@@ -124,6 +124,10 @@ public:
     void enableEviction(bool enable);
     void setMaxTextureMemory(size_t bytes);
     size_t getMaxTextureMemory() const;
+    
+    /// Update the eviction priority for a texture dynamically.
+    /// Use this to adjust priorities based on camera distance, LOD importance, etc.
+    void updateEvictionPriority(uint32_t textureId, EvictionPriority priority);
 
     // Utility
     void unloadTexture(uint32_t textureId);

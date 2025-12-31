@@ -1187,4 +1187,11 @@ size_t DemandTextureLoader::Impl::getMaxTextureMemory() const {
     return options_.maxTextureMemory;
 }
 
+void DemandTextureLoader::Impl::updateEvictionPriority(uint32_t texId, EvictionPriority priority) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (texId < nextTextureId_) {
+        textures_[texId].desc.evictionPriority = priority;
+    }
+}
+
 } // namespace hip_demand

@@ -92,6 +92,10 @@ size_t DemandTextureLoader::getMaxTextureMemory() const {
     return impl_->getMaxTextureMemory();
 }
 
+void DemandTextureLoader::updateEvictionPriority(uint32_t textureId, EvictionPriority priority) {
+    impl_->updateEvictionPriority(textureId, priority);
+}
+
 void DemandTextureLoader::unloadTexture(uint32_t textureId) {
     impl_->unloadTexture(textureId);
 }
