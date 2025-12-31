@@ -5,11 +5,48 @@
 #include <cstdio>
 #include <mutex>
 #include <string>
+#include <thread>
+
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 
 namespace hip_demand {
 namespace {
+
 std::atomic<LogLevel> gLogLevel{LogLevel::Off};
-std::mutex gLogMutex;
+
+// Use a spinlock for minimal contention on short log messages
+// This avoids heavy mutex overhead in hot paths
+class SpinLock {
+    std::atomic_flag flag_ = ATOMIC_FLAG_INIT;
+public:
+    void lock() noexcept {
+        // Use exponential backoff to reduce cache-line contention
+        for (int spin = 0; flag_.test_and_set(std::memory_order_acquire); ++spin) {
+            if (spin < 16) {
+                // Busy-wait for a few iterations
+#if defined(_MSC_VER)
+                _mm_pause();
+#elif defined(__x86_64__) || defined(__i386__)
+                __builtin_ia32_pause();
+#else
+                // ARM or other: just yield
+                std::this_thread::yield();
+#endif
+            } else {
+                // After spinning, yield to OS scheduler
+                std::this_thread::yield();
+            }
+        }
+    }
+    
+    void unlock() noexcept {
+        flag_.clear(std::memory_order_release);
+    }
+};
+
+SpinLock gLogLock;
 
 const char* levelTag(LogLevel level) {
     switch (level) {
@@ -39,21 +76,29 @@ void logMessage(LogLevel level, const char* fmt, ...) {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(gLogMutex);
-    std::fputs(levelTag(level), stderr);
-
+    // Format message into thread-local buffer to minimize lock hold time
+    thread_local char buffer[2048];
+    
     va_list args;
     va_start(args, fmt);
-    std::vfprintf(stderr, fmt, args);
+    int len = std::vsnprintf(buffer, sizeof(buffer) - 1, fmt, args);
     va_end(args);
-
-    if (fmt && fmt[0] != '\0') {
-        char last = fmt[std::char_traits<char>::length(fmt) - 1];
-        if (last != '\n') {
-            std::fputc('\n', stderr);
-        }
+    
+    if (len < 0) len = 0;
+    buffer[sizeof(buffer) - 1] = '\0';
+    
+    // Add newline if not present
+    bool needsNewline = (len > 0 && buffer[len - 1] != '\n');
+    
+    // Only hold lock during actual I/O
+    gLogLock.lock();
+    std::fputs(levelTag(level), stderr);
+    std::fputs(buffer, stderr);
+    if (needsNewline) {
+        std::fputc('\n', stderr);
     }
     std::fflush(stderr);
+    gLogLock.unlock();
 }
 
 } // namespace hip_demand

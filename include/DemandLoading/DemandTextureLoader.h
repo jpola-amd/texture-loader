@@ -29,6 +29,14 @@ class TextureRegistry;
 class RequestBuffer;
 class ImageReader;
 
+// Eviction priority for textures
+enum class EvictionPriority {
+    Normal = 0,    // Default - standard LRU eviction
+    Low = 1,       // Evict first (temporary/preview textures)
+    High = 2,      // Evict last (important textures)
+    KeepResident = 3  // Never evict (UI, hero textures)
+};
+
 // Configuration options
 struct LoaderOptions {
     size_t maxTextureMemory = 2ULL * 1024 * 1024 * 1024;  // 2 GB default
@@ -36,6 +44,7 @@ struct LoaderOptions {
     size_t maxRequestsPerLaunch = 1024;
     bool enableEviction = true;
     unsigned int maxThreads = 0;  // 0 = auto
+    unsigned int minResidentFrames = 3;  // Thrashing prevention: don't evict textures younger than this
 };
 
 // Texture descriptor
@@ -47,6 +56,7 @@ struct TextureDesc {
     bool sRGB = false;
     bool generateMipmaps = true;  // Generate mipmaps for better quality
     unsigned int maxMipLevel = 0;  // 0 = auto-generate all levels
+    EvictionPriority evictionPriority = EvictionPriority::Normal;  // Eviction priority hint
 };
 
 inline bool operator==(const TextureDesc& a, const TextureDesc& b) {
@@ -57,7 +67,8 @@ inline bool operator==(const TextureDesc& a, const TextureDesc& b) {
             a.normalizedCoords == b.normalizedCoords &&
             a.sRGB == b.sRGB &&
             a.generateMipmaps == b.generateMipmaps &&
-            a.maxMipLevel == b.maxMipLevel);
+            a.maxMipLevel == b.maxMipLevel &&
+            a.evictionPriority == b.evictionPriority);
 }
 
 // Texture information returned after creation

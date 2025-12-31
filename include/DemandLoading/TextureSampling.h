@@ -10,8 +10,43 @@
 
 namespace hip_demand {
 
-// Device-side texture sampling functions
-// These check residency and record requests if needed
+//=============================================================================
+// Device-side Helper Functions
+//=============================================================================
+
+// Get the current wave (wavefront) size at runtime
+// Note: RDNA (gfx10/11/12) uses wave32, older GCN uses wave64
+__device__ __forceinline__ int getWaveSize() {
+#if defined(__AMDGCN__)
+    return __builtin_amdgcn_wavefrontsize();
+#else
+    return 64;  // Default for unknown architectures
+#endif
+}
+
+// Get the current lane ID within the wave
+__device__ __forceinline__ int getLaneId() {
+#if defined(__AMDGCN__)
+    return __lane_id();
+#else
+    return threadIdx.x % 64;
+#endif
+}
+
+// Get the active lane mask for the current wave
+__device__ __forceinline__ uint64_t getActiveMask() {
+#if defined(HIP_ENABLE_WARP_SYNC_BUILTINS)
+    return __activemask();
+#elif defined(__AMDGCN__)
+    return __builtin_amdgcn_read_exec();
+#else
+    return ~0ULL;  // Assume all lanes active
+#endif
+}
+
+//=============================================================================
+// Texture Residency Check
+//=============================================================================
 
 __device__ __forceinline__ bool isTextureResident(const DeviceContext& ctx, uint32_t texId) {
     if (texId >= ctx.maxTextures) return false;
@@ -20,37 +55,43 @@ __device__ __forceinline__ bool isTextureResident(const DeviceContext& ctx, uint
     return (ctx.residentFlags[wordIdx] & (1u << bitIdx)) != 0;
 }
 
-// Record a texture request; use warp-level dedup where supported, otherwise per-thread atomics.
+//=============================================================================
+// Request Recording with Wave-Level Deduplication
+//=============================================================================
+
+// Record a texture request with wave-level deduplication to reduce atomic contention.
+// On AMD GPUs, this uses native wave intrinsics for efficient deduplication.
 __device__ __forceinline__ void recordTextureRequest(const DeviceContext& ctx, uint32_t texId) {
-    // If overflow already flagged, skip atomics to reduce contention.
-    // This is a best-effort early-out; using a volatile load is sufficient here.
-    const volatile uint32_t* overflowPtr = reinterpret_cast<volatile uint32_t*>(ctx.requestOverflow);
-    if (*overflowPtr != 0u) return;
+    // Early-out if overflow already flagged to reduce global memory traffic.
+    // Use __atomic_load_n for a true atomic load (no read-modify-write overhead).
+    if (__atomic_load_n(ctx.requestOverflow, __ATOMIC_RELAXED) != 0u) return;
 
 #if defined(HIP_ENABLE_WARP_SYNC_BUILTINS)
-    // Warp-level deduplication: only the leader for a given texId appends
-    const unsigned long long active = __activemask();
-    const unsigned long long match = __match_any_sync(active, texId);
-    const int leader = __ffsll(match) - 1;  // lowest set bit index
-    const int lane = static_cast<int>(__lane_id());
+    // Wave-level deduplication: only one lane per unique texId writes to global memory.
+    // __match_any_sync returns a mask of lanes that have the same value.
+    const uint64_t active = __activemask();
+    const uint64_t match = __match_any_sync(active, texId);
+    
+    // Find the leader lane (lowest active lane with this texId)
+    const int leader = __ffsll(static_cast<long long>(match)) - 1;
+    const int lane = getLaneId();
+    
+    // Only the leader lane issues the atomic
     if (lane != leader) return;
-
-    const uint32_t idx = atomicAdd(ctx.requestCount, 1u);
-    if (idx < ctx.maxRequests) {
-        ctx.requests[idx] = texId;
-    } else {
-        atomicExch(ctx.requestOverflow, 1u);
-    }
-#else
-    // Fallback when warp-sync builtins are unavailable
-    const uint32_t idx = atomicAdd(ctx.requestCount, 1u);
-    if (idx < ctx.maxRequests) {
-        ctx.requests[idx] = texId;
-    } else {
-        atomicExch(ctx.requestOverflow, 1u);
-    }
 #endif
+
+    // Common path: issue atomic (either as leader or when no wave-sync available)
+    const uint32_t idx = atomicAdd(ctx.requestCount, 1u);
+    if (idx < ctx.maxRequests) {
+        ctx.requests[idx] = texId;
+    } else {
+        atomicExch(ctx.requestOverflow, 1u);
+    }
 }
+
+//=============================================================================
+// Main Texture Sampling Functions
+//=============================================================================
 
 // Main texture sampling function
 // Returns true if texture is resident and sampled successfully
@@ -59,12 +100,13 @@ __device__ inline bool tex2D(const DeviceContext& ctx,
                              float u, float v,
                              float4& result,
                              float4 defaultColor = make_float4(1.0f, 0.0f, 1.0f, 1.0f)) {
-    // Bounds check
+    // Bounds check first
     if (texId >= ctx.maxTextures) {
         result = defaultColor;
         return false;
     }
     
+    // Now we know texId is valid - check residency
     if (!isTextureResident(ctx, texId)) {
         recordTextureRequest(ctx, texId);
         result = defaultColor;
@@ -82,7 +124,6 @@ __device__ inline bool tex2DGrad(const DeviceContext& ctx,
                                   float2 ddx, float2 ddy,
                                   float4& result,
                                   float4 defaultColor = make_float4(1.0f, 0.0f, 1.0f, 1.0f)) {
-    // Bounds check
     if (texId >= ctx.maxTextures) {
         result = defaultColor;
         return false;
@@ -105,7 +146,6 @@ __device__ inline bool tex2DLod(const DeviceContext& ctx,
                                 float lod,
                                 float4& result,
                                 float4 defaultColor = make_float4(1.0f, 0.0f, 1.0f, 1.0f)) {
-    // Bounds check
     if (texId >= ctx.maxTextures) {
         result = defaultColor;
         return false;

@@ -44,8 +44,10 @@ endif()
 # Library
 set(TEXTURE_LOADER_SOURCES
     src/DemandLoading/DemandTextureLoader.cpp
+    src/DemandLoading/DemandTextureLoaderImpl.cpp
     src/DemandLoading/Ticket.cpp
     src/DemandLoading/Logging.cpp
+    src/DemandLoading/stb_image_impl.cpp
 )
 
 if(USE_OIIO)
