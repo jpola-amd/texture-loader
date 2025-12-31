@@ -122,6 +122,14 @@ if(BUILD_EXAMPLES)
         INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
 
+    hip_add_executable(
+        TARGET path_tracing_kernel
+        SOURCES examples/path_tracing_kernel.hip
+        ARCHITECTURES ${HIP_ARCHITECTURES}
+            OPTIONS -O3 --std=c++17 -DHIP_ENABLE_WARP_SYNC_BUILTINS
+        INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+
     # Example application (host code only)
     add_executable(texture_loader_example
         examples/simple_render.cpp
@@ -145,6 +153,10 @@ if(BUILD_EXAMPLES)
 
     add_executable(streaming_scene_example
         examples/streaming_scene.cpp
+    )
+
+    add_executable(path_tracing_example
+        examples/path_tracing.cpp
     )
 
     target_include_directories(texture_loader_example
@@ -178,6 +190,12 @@ if(BUILD_EXAMPLES)
     )
 
     target_include_directories(streaming_scene_example
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${STB_INCLUDE_DIR}
+    )
+
+    target_include_directories(path_tracing_example
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${STB_INCLUDE_DIR}
@@ -218,6 +236,12 @@ if(BUILD_EXAMPLES)
             hip_demand_texture
     )
     target_compile_definitions(streaming_scene_example PRIVATE __HIP_PLATFORM_AMD__)
+
+    target_link_libraries(path_tracing_example
+        PRIVATE
+            hip_demand_texture
+    )
+    target_compile_definitions(path_tracing_example PRIVATE __HIP_PLATFORM_AMD__)
 
     # Copy kernel code object to output directory
     add_custom_command(TARGET texture_loader_example POST_BUILD
@@ -262,6 +286,13 @@ if(BUILD_EXAMPLES)
         COMMENT "Copying HIP kernel code object"
     )
 
+    add_custom_command(TARGET path_tracing_example POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_PROPERTY:path_tracing_kernel,HIP_CODE_OBJECT>
+            $<TARGET_FILE_DIR:path_tracing_example>/path_tracing_kernel.co
+        COMMENT "Copying HIP kernel code object"
+    )
+
     # Add dependency to ensure kernel is built first
     add_dependencies(texture_loader_example render_kernel)
     add_dependencies(tiled_render_example tiled_render_kernel)
@@ -269,6 +300,7 @@ if(BUILD_EXAMPLES)
     add_dependencies(atlas_render_example atlas_render_kernel)
     add_dependencies(async_vs_sync_example render_kernel)
     add_dependencies(streaming_scene_example streaming_scene_kernel)
+    add_dependencies(path_tracing_example path_tracing_kernel)
     
     # Benchmark suite
     hip_add_executable(
