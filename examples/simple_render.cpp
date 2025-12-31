@@ -42,6 +42,11 @@ struct KernelModule {
 
 int main(int argc, char** argv) {
     namespace fs = std::filesystem;
+
+    // Create output subfolder
+    const std::string outputDir = "simple_render_output";
+    fs::create_directories(outputDir);
+
     std::cout << "HIP Demand Texture Loader Example\n";
     std::cout << "==================================\n\n";
 
@@ -77,7 +82,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 16; ++i) {
         int size = 512 + i * 128;
         char filename[256];
-        sprintf(filename, "texture_%02d.png", i);
+        sprintf(filename, "%s/texture_%02d.png", outputDir.c_str(), i);
         hip_demand::TextureHandle handle;
 
         if (fs::exists(filename)) {
@@ -224,15 +229,16 @@ int main(int argc, char** argv) {
               << h_output[height / 2 * width + width / 2].z << ", "
               << h_output[height / 2 * width + width / 2].w << ")\n";
 
-    std::cout << "\nSaving final render to output.png...\n";
+    std::string outputPath = outputDir + "/output.png";
+    std::cout << "\nSaving final render to " << outputPath << "...\n";
     std::vector<uint8_t> output_rgb(width * height * 3);
     for (int i = 0; i < width * height; ++i) {
         output_rgb[i * 3 + 0] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, h_output[i].x * 255.0f)));
         output_rgb[i * 3 + 1] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, h_output[i].y * 255.0f)));
         output_rgb[i * 3 + 2] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, h_output[i].z * 255.0f)));
     }
-    stbi_write_png("output.png", width, height, 3, output_rgb.data(), width * 3);
-    std::cout << "Saved output.png (" << width << "x" << height << ")\n";
+    stbi_write_png(outputPath.c_str(), width, height, 3, output_rgb.data(), width * 3);
+    std::cout << "Saved " << outputPath << " (" << width << "x" << height << ")\n";
 
     hipFree(d_output);
     hipFree(d_textureIds);
