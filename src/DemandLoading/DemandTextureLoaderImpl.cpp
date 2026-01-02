@@ -56,7 +56,7 @@ DemandTextureLoader::Impl::Impl(const LoaderOptions& options)
     }
 
     // Allocate device memory for texture array
-    err = hipMalloc(&deviceContext_.textures, options_.maxTextures * sizeof(hipTextureObject_t));
+    err = hipMalloc(&deviceContext_.textures, options_.maxTextures * sizeof(TextureObject));
     if (err != hipSuccess) {
         lastError_ = LoaderError::OutOfMemory;
         hipFree(deviceContext_.requests);
@@ -94,7 +94,7 @@ DemandTextureLoader::Impl::Impl(const LoaderOptions& options)
     err = hipMemset(deviceContext_.residentFlags, 0, flagWords * sizeof(uint32_t));
     if (err != hipSuccess) lastError_ = LoaderError::HipError;
 
-    err = hipMemset(deviceContext_.textures, 0, options_.maxTextures * sizeof(hipTextureObject_t));
+    err = hipMemset(deviceContext_.textures, 0, options_.maxTextures * sizeof(TextureObject));
     if (err != hipSuccess) lastError_ = LoaderError::HipError;
 
     err = hipMemset(d_requestStats_, 0, sizeof(RequestStats));
@@ -110,7 +110,7 @@ DemandTextureLoader::Impl::Impl(const LoaderOptions& options)
         lastError_ = LoaderError::OutOfMemory;
         return;
     }
-    if (hipHostMalloc(reinterpret_cast<void**>(&h_textures_), options_.maxTextures * sizeof(hipTextureObject_t)) != hipSuccess) {
+    if (hipHostMalloc(reinterpret_cast<void**>(&h_textures_), options_.maxTextures * sizeof(TextureObject)) != hipSuccess) {
         lastError_ = LoaderError::OutOfMemory;
         hipHostFree(h_residentFlags_);
         h_residentFlags_ = nullptr;
@@ -136,7 +136,7 @@ DemandTextureLoader::Impl::Impl(const LoaderOptions& options)
     }
 
     std::fill_n(h_residentFlags_, flagWords, 0u);
-    std::fill_n(h_textures_, options_.maxTextures, static_cast<hipTextureObject_t>(0));
+    std::fill_n(h_textures_, options_.maxTextures, static_cast<TextureObject>(0));
     std::fill_n(h_requests_, options_.maxRequestsPerLaunch, 0u);
     h_requestStats_->count = 0;
     h_requestStats_->overflow = 0;
@@ -472,7 +472,7 @@ void DemandTextureLoader::Impl::launchPrepare(hipStream_t stream) {
                    residentWords,
                    static_cast<double>(residentWords * sizeof(uint32_t)) / 1024.0,
                    textureCount,
-                   static_cast<double>(textureCount * sizeof(hipTextureObject_t)) / 1024.0);
+                   static_cast<double>(textureCount * sizeof(TextureObject)) / 1024.0);
     }
 
     if (residentFlagsDirty_) {
@@ -500,7 +500,7 @@ void DemandTextureLoader::Impl::launchPrepare(hipStream_t stream) {
             const size_t count = std::min(options_.maxTextures - begin, end - begin + 1);
             err = hipMemcpyAsync(deviceContext_.textures + begin,
                                  h_textures_ + begin,
-                                 count * sizeof(hipTextureObject_t),
+                                 count * sizeof(TextureObject),
                                  hipMemcpyHostToDevice,
                                  stream);
             if (err != hipSuccess) {
@@ -1127,7 +1127,7 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
     info.width = finalWidth;
     info.height = finalHeight;
     info.channels = finalChannels;
-    h_textures_[texId] = info.texObj;
+    h_textures_[texId] = (TextureObject) info.texObj;
     uint32_t wordIdx = texId / 32;
     uint32_t bitIdx = texId % 32;
     h_residentFlags_[wordIdx] |= (1u << bitIdx);

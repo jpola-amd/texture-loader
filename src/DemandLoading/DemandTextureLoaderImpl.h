@@ -96,7 +96,7 @@ private:
 
     // Host pinned buffers
     uint32_t* h_residentFlags_ = nullptr;
-    hipTextureObject_t* h_textures_ = nullptr;
+    TextureObject* h_textures_ = nullptr;  // Binary-compatible with hipTextureObject_t
     uint32_t* h_requests_ = nullptr;
     internal::RequestStats* h_requestStats_ = nullptr;
     size_t flagWordCount_ = 0;

@@ -2,17 +2,21 @@
 
 /// @file DeviceContext.h
 /// @brief Device context for GPU texture sampling.
-/// @note This header requires HIP types. Include <hip/hip_runtime.h> before this header.
+/// @note No HIP headers required. This header uses platform-agnostic types.
 
 #include <cstdint>
 
 namespace hip_demand {
 
+/// Platform-agnostic texture object handle.
+/// This is binary-compatible with hipTextureObject_t (unsigned long long).
+using TextureObject = unsigned long long;
+
 // Device context passed to kernels
 // This structure contains GPU-accessible data for texture sampling
 struct DeviceContext {
     uint32_t* residentFlags;      // Bit flags for texture residency
-    hipTextureObject_t* textures; // Array of texture objects
+    TextureObject* textures;      // Array of texture objects
     uint32_t* requests;           // Request buffer
     uint32_t* requestCount;       // Atomic counter for requests
     uint32_t* requestOverflow;    // Flag set when request buffer overflows

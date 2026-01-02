@@ -2,6 +2,7 @@
 // Unit tests for TextureInfo
 
 #include <gtest/gtest.h>
+#include <hip/hip_runtime.h>
 #include <ImageSource/TextureInfo.h>
 
 namespace hip_demand {

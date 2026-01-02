@@ -11,6 +11,10 @@
 #include <memory>
 #include <string>
 
+ // Verify binary compatibility between TextureObject and hipTextureObject_t
+static_assert(sizeof(hip_demand::TextureObject) == sizeof(hipTextureObject_t),
+              "TextureObject must be binary-compatible with hipTextureObject_t");
+
 namespace hip_demand {
 namespace internal {
 
