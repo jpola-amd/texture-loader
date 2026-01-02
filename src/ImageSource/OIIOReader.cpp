@@ -1,3 +1,4 @@
+#include <hip/hip_runtime.h>
 #include "ImageSource/OIIOReader.h"
 #include <OpenImageIO/imageio.h>
 #include <algorithm>

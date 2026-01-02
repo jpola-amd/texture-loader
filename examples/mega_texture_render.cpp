@@ -1,6 +1,7 @@
+#include <hip/hip_runtime.h>
+
 #include "DemandLoading/DemandTextureLoader.h"
 #include "DemandLoading/Logging.h"
-#include <hip/hip_runtime.h>
 #include <iostream>
 #include <vector>
 #include <cmath>

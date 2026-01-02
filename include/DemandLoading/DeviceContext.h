@@ -1,6 +1,9 @@
 #pragma once
 
-#include <hip/hip_runtime.h>
+/// @file DeviceContext.h
+/// @brief Device context for GPU texture sampling.
+/// @note This header requires HIP types. Include <hip/hip_runtime.h> before this header.
+
 #include <cstdint>
 
 namespace hip_demand {

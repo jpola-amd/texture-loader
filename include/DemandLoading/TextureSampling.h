@@ -1,8 +1,11 @@
 #pragma once
 
+/// @file TextureSampling.h
+/// @brief Device-side texture sampling functions for demand loading.
+/// @note This header requires HIP types. Include <hip/hip_runtime.h> before this header.  
+///       Must be compiled with HIP compiler (hipcc) for device code.
+
 #include "DemandLoading/DeviceContext.h"
-#include <hip/hip_runtime.h>
-#include <hip/texture_types.h>
 
 #if !defined(HIP_ENABLE_WARP_SYNC_BUILTINS)
 #warning "HIP_ENABLE_WARP_SYNC_BUILTINS is not defined; warp-sync builtins may be unavailable"

@@ -3,9 +3,10 @@
 // Rays bounce through a Cornell box-style scene, accessing textures based on
 // where they hit surfaces - stressing the demand loading system with scattered access.
 
+#include <hip/hip_runtime.h>
+
 #include "DemandLoading/DemandTextureLoader.h"
 #include "DemandLoading/Logging.h"
-#include <hip/hip_runtime.h>
 #include <iostream>
 #include <iomanip>
 #include <vector>

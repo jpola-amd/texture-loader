@@ -1,7 +1,6 @@
+#include <hip/hip_runtime.h>
 #include "DemandLoading/DemandTextureLoader.h"
 #include "DemandLoading/Logging.h"
-#include <hip/hip_runtime.h>
-#include <hip/hip_runtime_api.h>
 #include <iostream>
 #include <chrono>
 #include <vector>

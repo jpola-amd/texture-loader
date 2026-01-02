@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // DemandTextureLoader public API implementation
 
+#include <hip/hip_runtime.h>
 #include <DemandLoading/DemandTextureLoader.h>
 #include "DemandTextureLoaderImpl.h"
-
 namespace hip_demand {
 
 // -----------------------------------------------------------------------------

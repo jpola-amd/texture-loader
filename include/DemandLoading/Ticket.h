@@ -1,6 +1,9 @@
 #pragma once
 
-#include <hip/hip_runtime.h>
+/// @file Ticket.h
+/// @brief Async task tracking for demand loading operations.
+/// @note This header requires HIP types. Include <hip/hip_runtime.h> before this header.
+
 #include <memory>
 #include <atomic>
 #include <condition_variable>

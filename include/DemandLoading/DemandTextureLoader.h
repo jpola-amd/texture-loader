@@ -1,8 +1,11 @@
 #pragma once
 
+/// @file DemandTextureLoader.h
+/// @brief Demand texture loading API for HIP applications.
+/// @note This header requires HIP types. Include <hip/hip_runtime.h> before this header.
+
 #include "DemandLoading/DeviceContext.h"
 #include "DemandLoading/Ticket.h"
-#include <hip/hip_runtime.h>
 #include <string>
 #include <memory>
 #include <vector>

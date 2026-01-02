@@ -1,9 +1,9 @@
 #pragma once
 
-/// \file ImageSource.h
-/// Interface for mipmapped image loading with HIP
+/// @file ImageSource.h
+/// @brief Interface for mipmapped image loading.
+/// @note This header requires HIP types. Include <hip/hip_runtime.h> before this header.
 
-#include <hip/hip_runtime.h>
 #include <memory>
 #include <string>
 

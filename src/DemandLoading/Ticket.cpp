@@ -1,5 +1,5 @@
+#include <hip/hip_runtime.h>
 #include "DemandLoading/Ticket.h"
-
 #include <thread>
 #include <queue>
 

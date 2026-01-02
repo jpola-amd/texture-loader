@@ -1,9 +1,8 @@
 #pragma once
 
-/// \file TextureInfo.h
-/// Image metadata and format information
-
-#include <hip/hip_runtime.h>
+/// @file TextureInfo.h
+/// @brief Image metadata and format information.
+/// @note This header requires HIP types. Include <hip/hip_runtime.h> before this header.
 
 namespace hip_demand {
 
