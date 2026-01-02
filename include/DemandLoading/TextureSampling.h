@@ -116,7 +116,7 @@ __device__ inline bool tex2D(const DeviceContext& ctx,
         return false;
     }
     
-    result = ::tex2D<float4>(ctx.textures[texId], u, v);
+    result = ::tex2D<float4>((hipTextureObject_t)ctx.textures[texId], u, v);
     return true;
 }
 
@@ -138,7 +138,7 @@ __device__ inline bool tex2DGrad(const DeviceContext& ctx,
         return false;
     }
     
-    result = ::tex2DGrad<float4>(ctx.textures[texId], u, v, ddx, ddy);
+    result = ::tex2DGrad<float4>((hipTextureObject_t)ctx.textures[texId], u, v, ddx, ddy);
     return true;
 }
 
@@ -160,7 +160,7 @@ __device__ inline bool tex2DLod(const DeviceContext& ctx,
         return false;
     }
     
-    result = ::tex2DLod<float4>(ctx.textures[texId], u, v, lod);
+    result = ::tex2DLod<float4>((hipTextureObject_t)ctx.textures[texId], u, v, lod);
     return true;
 }
 

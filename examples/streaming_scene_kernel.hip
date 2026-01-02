@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Streaming scene kernel - samples visible tile textures
 
-#include "DemandLoading/TextureSampling.h"
 #include <hip/hip_runtime.h>
+#include "DemandLoading/TextureSampling.h"
 
 using namespace hip_demand;
 

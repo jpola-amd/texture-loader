@@ -1,5 +1,5 @@
-#include "DemandLoading/TextureSampling.h"
 #include <hip/hip_runtime.h>
+#include "DemandLoading/TextureSampling.h"
 
 using namespace hip_demand;
 
