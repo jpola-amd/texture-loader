@@ -7,9 +7,10 @@
 
 #include <DemandLoading/Logging.h>
 #include <DemandLoading/Ticket.h>
+#include <ImageSource/ImageSource.h>
+#include <ImageSource/TextureInfo.h>
 
 #ifdef USE_OIIO
-#include <ImageSource/ImageSource.h>
 #include <ImageSource/OIIOReader.h>
 #endif
 
