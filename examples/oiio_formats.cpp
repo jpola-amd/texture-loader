@@ -45,10 +45,14 @@ void testImageFormat(const std::string& filename) {
         std::cout << "Pixel Format:  ";
         
         switch (info.format) {
-            case hip_demand::PixelFormat::UINT8:   std::cout << "UINT8 (8-bit)"; break;
-            case hip_demand::PixelFormat::UINT16:  std::cout << "UINT16 (16-bit)"; break;
-            case hip_demand::PixelFormat::FLOAT16: std::cout << "FLOAT16 (half)"; break;
-            case hip_demand::PixelFormat::FLOAT32: std::cout << "FLOAT32 (float)"; break;
+            case HIP_AD_FORMAT_UNSIGNED_INT8:  std::cout << "UINT8 (8-bit)"; break;
+            case HIP_AD_FORMAT_UNSIGNED_INT16: std::cout << "UINT16 (16-bit)"; break;
+            case HIP_AD_FORMAT_UNSIGNED_INT32: std::cout << "UINT32 (32-bit)"; break;
+            case HIP_AD_FORMAT_SIGNED_INT8:    std::cout << "INT8 (8-bit signed)"; break;
+            case HIP_AD_FORMAT_SIGNED_INT16:   std::cout << "INT16 (16-bit signed)"; break;
+            case HIP_AD_FORMAT_SIGNED_INT32:   std::cout << "INT32 (32-bit signed)"; break;
+            case HIP_AD_FORMAT_HALF:           std::cout << "FLOAT16 (half)"; break;
+            case HIP_AD_FORMAT_FLOAT:          std::cout << "FLOAT32 (float)"; break;
             default: std::cout << "Unknown"; break;
         }
         std::cout << std::endl;
@@ -67,7 +71,7 @@ void testImageFormat(const std::string& filename) {
             std::cout << "[OK] Successfully read base mip level" << std::endl;
             
             // Sample center pixel (assuming UINT8 for display)
-            if (info.format == hip_demand::PixelFormat::UINT8 && info.numChannels >= 3) {
+            if (info.format == HIP_AD_FORMAT_UNSIGNED_INT8 && info.numChannels >= 3) {
                 size_t centerPixel = (info.height / 2) * info.width + (info.width / 2);
                 size_t pixelOffset = centerPixel * info.numChannels;
                 

@@ -7,21 +7,12 @@
 
 namespace hip_demand {
 
-/// Pixel format enumeration
-enum class PixelFormat
-{
-    UINT8,     // 8-bit unsigned integer per channel
-    UINT16,    // 16-bit unsigned integer per channel
-    FLOAT16,   // 16-bit float per channel
-    FLOAT32    // 32-bit float per channel
-};
-
 /// Image info, including dimensions and format
 struct TextureInfo
 {
     unsigned int width = 0;
     unsigned int height = 0;
-    PixelFormat format = PixelFormat::UINT8;
+    hipArray_Format format = HIP_AD_FORMAT_UNSIGNED_INT8;
     unsigned int numChannels = 0;
     unsigned int numMipLevels = 0;
     bool isValid = false;
@@ -29,15 +20,23 @@ struct TextureInfo
 };
 
 /// Get the channel size in bytes
-inline unsigned int getBytesPerChannel(PixelFormat format)
+inline unsigned int getBytesPerChannel(hipArray_Format format)
 {
     switch (format)
     {
-        case PixelFormat::UINT8:   return 1;
-        case PixelFormat::UINT16:  return 2;
-        case PixelFormat::FLOAT16: return 2;
-        case PixelFormat::FLOAT32: return 4;
-        default:                   return 0;
+        case HIP_AD_FORMAT_UNSIGNED_INT8:
+        case HIP_AD_FORMAT_SIGNED_INT8:
+            return 1;
+        case HIP_AD_FORMAT_UNSIGNED_INT16:
+        case HIP_AD_FORMAT_SIGNED_INT16:
+        case HIP_AD_FORMAT_HALF:
+            return 2;
+        case HIP_AD_FORMAT_UNSIGNED_INT32:
+        case HIP_AD_FORMAT_SIGNED_INT32:
+        case HIP_AD_FORMAT_FLOAT:
+            return 4;
+        default:
+            return 0;
     }
 }
 

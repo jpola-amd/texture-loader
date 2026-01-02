@@ -49,20 +49,20 @@ void OIIOReader::open(TextureInfo* info)
     switch (spec.format.basetype)
     {
         case OIIO::TypeDesc::UINT8:
-            info_.format = PixelFormat::UINT8;
+            info_.format = HIP_AD_FORMAT_UNSIGNED_INT8;
             break;
         case OIIO::TypeDesc::UINT16:
-            info_.format = PixelFormat::UINT16;
+            info_.format = HIP_AD_FORMAT_UNSIGNED_INT16;
             break;
         case OIIO::TypeDesc::HALF:
-            info_.format = PixelFormat::FLOAT16;
+            info_.format = HIP_AD_FORMAT_HALF;
             break;
         case OIIO::TypeDesc::FLOAT:
-            info_.format = PixelFormat::FLOAT32;
+            info_.format = HIP_AD_FORMAT_FLOAT;
             break;
         default:
             // Default to UINT8 and let OIIO convert
-            info_.format = PixelFormat::UINT8;
+            info_.format = HIP_AD_FORMAT_UNSIGNED_INT8;
             break;
     }
     
