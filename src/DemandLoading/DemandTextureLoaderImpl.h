@@ -47,6 +47,7 @@ public:
     void enableEviction(bool enable);
     void setMaxTextureMemory(size_t bytes);
     size_t getMaxTextureMemory() const;
+    void updateEvictionPriority(uint32_t texId, EvictionPriority priority);
     void unloadTexture(uint32_t texId);
     void unloadAll();
 

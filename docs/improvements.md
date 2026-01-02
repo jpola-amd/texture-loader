@@ -32,11 +32,11 @@
 ## Remaining Improvements
 
 ### Performance
-- Use GPU-accelerated mipmap generation instead of CPU box filter (current CPU path is slow for large textures).
 - Consider block-level request aggregation using shared memory to further reduce global atomics.
 
 ### AMD-Specific
 - Add support for BC7/DXT compressed textures which are highly efficient on AMD GPUs.
+- Load pre-computed mipmaps from DDS/KTX formats instead of runtime generation.
 - Consider using `hipMallocAsync`/`hipFreeAsync` with memory pools (HIP 5.3+) for texture allocations.
 - Investigate Infinity Cache (L3) optimization for texture access patterns on RDNA2/3.
 

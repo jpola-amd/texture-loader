@@ -53,6 +53,11 @@ static void generateSmallTexture(const char* filename, int size, int id) {
 
 int main() {
     namespace fs = std::filesystem;
+
+    // Create output subfolder
+    const std::string outputDir = "atlas_render_output";
+    fs::create_directories(outputDir);
+
     std::cout << "Atlas churn example\n";
 
     int deviceCount = 0;
@@ -91,8 +96,8 @@ int main() {
 
     std::cout << "Preparing textures...\n";
     for (int i = 0; i < numTextures; ++i) {
-        char filename[64];
-        sprintf(filename, "atlas_tex_%03d.png", i);
+        char filename[256];
+        sprintf(filename, "%s/atlas_tex_%03d.png", outputDir.c_str(), i);
 
         hip_demand::TextureHandle handle;
         if (fs::exists(filename)) {
@@ -177,8 +182,9 @@ int main() {
         output_rgb[i*3 + 1] = static_cast<uint8_t>(fminf(255.0f, fmaxf(0.0f, h_output[i].y * 255.0f)));
         output_rgb[i*3 + 2] = static_cast<uint8_t>(fminf(255.0f, fmaxf(0.0f, h_output[i].z * 255.0f)));
     }
-    stbi_write_png("output_atlas.png", width, height, 3, output_rgb.data(), width * 3);
-    std::cout << "Saved output_atlas.png\n";
+    std::string outputPath = outputDir + "/output_atlas.png";
+    stbi_write_png(outputPath.c_str(), width, height, 3, output_rgb.data(), width * 3);
+    std::cout << "Saved " << outputPath << "\n";
 
     hipFree(d_output);
     hipFree(d_textureIds);

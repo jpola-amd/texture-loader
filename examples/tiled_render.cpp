@@ -34,6 +34,11 @@ struct KernelModule {
 
 int main() {
     namespace fs = std::filesystem;
+
+    // Create output subfolder
+    const std::string outputDir = "tiled_render_output";
+    fs::create_directories(outputDir);
+
     std::cout << "Tiled render example\n";
 
     int deviceCount = 0;
@@ -64,8 +69,8 @@ int main() {
     std::cout << "Creating textures...\n";
     for (int i = 0; i < 16; ++i) {
         int size = 512 + i * 128;
-        char filename[64];
-        sprintf(filename, "texture_%02d.png", i);
+        char filename[256];
+        sprintf(filename, "%s/texture_%02d.png", outputDir.c_str(), i);
 
         hip_demand::TextureHandle handle;
 
@@ -179,8 +184,9 @@ int main() {
         output_rgb[i*3 + 1] = static_cast<uint8_t>(fminf(255.0f, fmaxf(0.0f, h_output[i].y * 255.0f)));
         output_rgb[i*3 + 2] = static_cast<uint8_t>(fminf(255.0f, fmaxf(0.0f, h_output[i].z * 255.0f)));
     }
-    stbi_write_png("output_tiled.png", width, height, 3, output_rgb.data(), width * 3);
-    std::cout << "Saved output_tiled.png\n";
+    std::string outputPath = outputDir + "/output_tiled.png";
+    stbi_write_png(outputPath.c_str(), width, height, 3, output_rgb.data(), width * 3);
+    std::cout << "Saved " << outputPath << "\n";
 
     hipFree(d_output);
     hipFree(d_textureIds);

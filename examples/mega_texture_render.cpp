@@ -74,6 +74,11 @@ static void generateMegaTexture(const char* filename, int size, float hueShift) 
 
 int main() {
     namespace fs = std::filesystem;
+
+    // Create output subfolder
+    const std::string outputDir = "mega_texture_output";
+    fs::create_directories(outputDir);
+
     std::cout << "Mega-texture flythrough example\n";
 
     int deviceCount = 0;
@@ -103,9 +108,9 @@ int main() {
 
     const int texSize = 8192;
     std::vector<std::string> filenames = {
-        "mega_texture_A.png",
-        "mega_texture_B.png",
-        "mega_texture_C.png"
+        outputDir + "/mega_texture_A.png",
+        outputDir + "/mega_texture_B.png",
+        outputDir + "/mega_texture_C.png"
     };
 
     std::vector<hip_demand::TextureHandle> handles;
@@ -205,8 +210,9 @@ int main() {
         output_rgb[i*3 + 1] = static_cast<uint8_t>(fminf(255.0f, fmaxf(0.0f, h_output[i].y * 255.0f)));
         output_rgb[i*3 + 2] = static_cast<uint8_t>(fminf(255.0f, fmaxf(0.0f, h_output[i].z * 255.0f)));
     }
-    stbi_write_png("output_mega.png", width, height, 3, output_rgb.data(), width * 3);
-    std::cout << "Saved output_mega.png\n";
+    std::string outputPath = outputDir + "/output_mega.png";
+    stbi_write_png(outputPath.c_str(), width, height, 3, output_rgb.data(), width * 3);
+    std::cout << "Saved " << outputPath << "\n";
 
     hipFree(d_output);
     hipStreamDestroy(stream);
