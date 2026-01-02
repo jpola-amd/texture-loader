@@ -104,4 +104,12 @@ void DemandTextureLoader::unloadAll() {
     impl_->unloadAll();
 }
 
+void DemandTextureLoader::abort() {
+    impl_->abort();
+}
+
+bool DemandTextureLoader::isAborted() const {
+    return impl_->isAborted();
+}
+
 } // namespace hip_demand

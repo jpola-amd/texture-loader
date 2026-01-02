@@ -50,6 +50,8 @@ public:
     void updateEvictionPriority(uint32_t texId, EvictionPriority priority);
     void unloadTexture(uint32_t texId);
     void unloadAll();
+    void abort();
+    bool isAborted() const;
 
 private:
     // RAII guard for async operations
@@ -117,6 +119,7 @@ private:
     // Async operation coordination
     std::atomic<int> inFlightAsync_{0};
     std::atomic<bool> destroying_{false};
+    std::atomic<bool> aborted_{false};
     mutable std::mutex asyncMutex_;
     mutable std::condition_variable asyncCv_;
 

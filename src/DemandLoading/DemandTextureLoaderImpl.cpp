@@ -438,6 +438,11 @@ DeviceContext DemandTextureLoader::Impl::getDeviceContext() const {
 // -----------------------------------------------------------------------------
 
 size_t DemandTextureLoader::Impl::processRequests(hipStream_t stream, const DeviceContext& deviceContext) {
+    // Early exit if aborted
+    if (aborted_.load(std::memory_order_acquire)) {
+        return 0;
+    }
+
     uint32_t requestCount = 0;
     uint32_t overflow = 0;
 
@@ -495,6 +500,11 @@ Ticket DemandTextureLoader::Impl::processRequestsAsync(hipStream_t stream, const
     AsyncGuard asyncGuard{this};
 
     if (destroying_.load(std::memory_order_seq_cst)) {
+        return Ticket{};
+    }
+
+    // Early exit if aborted
+    if (aborted_.load(std::memory_order_acquire)) {
         return Ticket{};
     }
 
@@ -689,6 +699,11 @@ bool DemandTextureLoader::Impl::loadTextureThreadSafe(uint32_t texId) {
 }
 
 bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
+    // Early exit if aborted
+    if (aborted_.load(std::memory_order_acquire)) {
+        return false;
+    }
+
     // Double-checked locking pattern with atomic loading flag
     TextureMetadata& info = textures_[texId];
     if (info.resident.load(std::memory_order_acquire) ||
@@ -1192,6 +1207,52 @@ void DemandTextureLoader::Impl::updateEvictionPriority(uint32_t texId, EvictionP
     if (texId < nextTextureId_) {
         textures_[texId].desc.evictionPriority = priority;
     }
+}
+
+// -----------------------------------------------------------------------------
+// Abort
+// -----------------------------------------------------------------------------
+
+void DemandTextureLoader::Impl::abort() {
+    // Set aborted flag first to prevent new operations from starting
+    aborted_.store(true, std::memory_order_seq_cst);
+    
+    logMessage(LogLevel::Info, "abort: halting all operations");
+    
+    // Wait for all in-flight async operations to complete
+    {
+        std::unique_lock<std::mutex> lock(asyncMutex_);
+        asyncCv_.wait(lock, [&] { return inFlightAsync_.load(std::memory_order_acquire) == 0; });
+    }
+    
+    // Stop thread pool from accepting new work and wait for current tasks
+    if (threadPool_) {
+        threadPool_.reset();
+    }
+    
+    // Release pinned memory pool (frees all pooled pinned buffers)
+    if (pinnedMemoryPool_) {
+        pinnedMemoryPool_.reset();
+    }
+    
+    // Release HIP event pool (destroys all pooled events)
+    if (hipEventPool_) {
+        hipEventPool_.reset();
+    }
+    
+    // Unload all textures to free GPU resources
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (uint32_t i = 0; i < nextTextureId_; ++i) {
+            destroyTexture(i);
+        }
+    }
+    
+    logMessage(LogLevel::Info, "abort: completed gracefully");
+}
+
+bool DemandTextureLoader::Impl::isAborted() const {
+    return aborted_.load(std::memory_order_acquire);
 }
 
 } // namespace hip_demand

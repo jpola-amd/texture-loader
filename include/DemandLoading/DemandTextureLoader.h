@@ -133,6 +133,14 @@ public:
     void unloadTexture(uint32_t textureId);
     void unloadAll();
 
+    /// Abort all pending operations and halt the loader gracefully.
+    /// After calling abort(), no new requests will be processed.
+    /// Safe to call from any thread. Blocks until all in-flight operations complete.
+    void abort();
+
+    /// Check if the loader has been aborted.
+    bool isAborted() const;
+
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;
