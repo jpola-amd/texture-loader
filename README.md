@@ -17,6 +17,7 @@
 - ✅ **Error Handling**: Comprehensive HIP error checking on all API calls
 - ✅ **Request Overflow Detection**: Monitors and reports request buffer status
 - ✅ **Flexible Image Loading**: Built-in stb_image support with optional OpenImageIO for advanced formats (EXR, HDR, etc.)
+- ✅ **Unit Tests**: Comprehensive test suite using Google Test
 
 ## Quick Start
 
@@ -77,6 +78,11 @@ cmake --build build
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=ON
 cmake --build build
 ./build/texture_loader_example
+
+# With unit tests
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
 
 # With OpenImageIO
 sudo apt install libopenimageio-dev

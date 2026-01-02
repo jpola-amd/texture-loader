@@ -266,6 +266,82 @@ hip_add_executable(
 )
 ```
 
+## Unit Tests
+
+The project includes a comprehensive test suite using Google Test.
+
+### Building Tests
+
+```powershell
+# Windows
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTS=ON
+cmake --build build --config Release
+```
+
+```bash
+# Linux
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/rocm -DBUILD_TESTS=ON
+cmake --build build -j$(nproc)
+```
+
+**Note**: The first build with tests will download Google Test automatically via CMake FetchContent.
+
+### Running Tests
+
+```powershell
+# Windows - Run all tests
+ctest --test-dir build -C Release --output-on-failure
+
+# Run with verbose output
+ctest --test-dir build -C Release -V
+
+# Run specific test suite
+ctest --test-dir build -C Release -R TextureInfo
+
+# List available tests
+ctest --test-dir build -C Release -N
+```
+
+```bash
+# Linux - Run all tests
+ctest --test-dir build --output-on-failure
+
+# Or run the test executable directly
+./build/texture_loader_tests
+```
+
+### Test Coverage
+
+The test suite covers:
+
+| Test Suite | Description |
+|------------|-------------|
+| `TextureInfoTests` | `TextureInfo` struct, `getBytesPerChannel()`, `getTextureSizeInBytes()` |
+| `DemandTextureLoaderTests` | Loader creation, texture creation, device context, statistics, abort |
+| `ThreadPoolTests` | Thread pool construction, task execution, concurrency, shutdown |
+| `MemoryPoolTests` | `PinnedMemoryPool` and `HipEventPool` allocation and reuse |
+| `TicketTests` | Async ticket construction and wait behavior |
+
+### Test Requirements
+
+- **GPU Required**: Most tests require a HIP-compatible AMD GPU
+- **ROCm/HIP**: Must be properly installed and configured
+- **Internet**: First build downloads Google Test (~1 MB)
+
+### Combining Build Options
+
+```powershell
+# Build everything: library, examples, and tests
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+      -DBUILD_EXAMPLES=ON `
+      -DBUILD_TESTS=ON `
+      -DUSE_OIIO=ON
+cmake --build build --config Release
+
+# Run tests
+ctest --test-dir build -C Release --output-on-failure
+```
+
 ## Troubleshooting
 
 ### "HIP not found"
@@ -333,6 +409,9 @@ desc.maxMipLevel = 4;          // Limit mip levels
 |----------|---------|-------------|
 | `HIP_PATH` | Auto | Path to HIP installation |
 | `STB_INCLUDE_DIR` | `external/stb` | Path to stb headers |
+| `BUILD_EXAMPLES` | OFF | Build example applications |
+| `BUILD_TESTS` | OFF | Build unit tests (fetches Google Test) |
+| `USE_OIIO` | OFF | Enable OpenImageIO support |
 | `CMAKE_BUILD_TYPE` | Release | Build configuration |
 
 ### Compiler Flags

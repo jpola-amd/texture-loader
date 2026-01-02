@@ -22,6 +22,7 @@ set(STB_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/stb" CACHE PATH "Path 
 
 # Build options
 option(BUILD_EXAMPLES "Build example applications" OFF)
+option(BUILD_TESTS "Build unit tests" OFF)
 option(USE_OIIO "Use OpenImageIO for image loading" OFF)
 
 # GPU architectures to compile for
@@ -357,6 +358,59 @@ if(BUILD_EXAMPLES)
         
         message(STATUS "Building OpenImageIO format example")
     endif()
+endif()
+
+# Unit Tests (optional)
+if(BUILD_TESTS)
+    # Fetch GoogleTest
+    include(FetchContent)
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG v1.14.0
+    )
+    # Prevent overriding the parent project's compiler/linker settings on Windows
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+    
+    enable_testing()
+    
+    # Test executable
+    add_executable(texture_loader_tests
+        tests/main.cpp
+        tests/TextureInfoTests.cpp
+        tests/DemandTextureLoaderTests.cpp
+        tests/ThreadPoolTests.cpp
+        tests/MemoryPoolTests.cpp
+        tests/TicketTests.cpp
+    )
+    
+    target_include_directories(texture_loader_tests
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${STB_INCLUDE_DIR}
+    )
+    
+    target_link_libraries(texture_loader_tests
+        PRIVATE
+            hip_demand_texture
+            GTest::gtest
+            GTest::gtest_main
+    )
+    
+    target_compile_definitions(texture_loader_tests PRIVATE __HIP_PLATFORM_AMD__)
+    
+    # Add OpenImageIO support to tests if enabled
+    if(USE_OIIO)
+        target_compile_definitions(texture_loader_tests PRIVATE USE_OIIO)
+    endif()
+    
+    # Register tests with CTest
+    include(GoogleTest)
+    gtest_discover_tests(texture_loader_tests)
+    
+    message(STATUS "Building unit tests")
 endif()
 
 # Installation
