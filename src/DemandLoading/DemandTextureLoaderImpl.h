@@ -6,6 +6,7 @@
 #include <DemandLoading/DemandTextureLoader.h>
 #include <DemandLoading/DeviceContext.h>
 #include <DemandLoading/Ticket.h>
+#include <ImageSource/ImageSource.h>
 #include "Internal/TextureMetadata.h"
 #include "Internal/HipEventPool.h"
 #include "Internal/PinnedMemoryPool.h"
@@ -17,6 +18,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace hip_demand {
@@ -33,6 +35,7 @@ public:
 
     // Public API implementations
     TextureHandle createTexture(const std::string& filename, const TextureDesc& desc);
+    TextureHandle createTexture(std::shared_ptr<ImageSource> imageSource, const TextureDesc& desc);
     TextureHandle createTextureFromMemory(const void* data, int width, int height,
                                          int channels, const TextureDesc& desc);
     void launchPrepare(hipStream_t stream);
@@ -111,6 +114,10 @@ private:
     uint32_t nextTextureId_ = 0;
     uint32_t currentFrame_ = 0;
     size_t totalMemoryUsage_ = 0;
+
+    // Texture deduplication maps (requires mutex_)
+    std::unordered_map<ImageSource*, uint32_t> imageSourceToTextureId_;  // ImageSource* -> textureId
+    std::unordered_map<size_t, uint32_t> filenameHashToTextureId_;       // hash(filename) -> textureId
 
     // Statistics
     std::atomic<size_t> lastRequestCount_{0};

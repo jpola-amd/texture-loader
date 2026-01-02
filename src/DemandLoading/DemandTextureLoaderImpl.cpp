@@ -248,6 +248,19 @@ void DemandTextureLoader::Impl::markResidentWordDirtyLocked(uint32_t wordIdx) {
 TextureHandle DemandTextureLoader::Impl::createTexture(const std::string& filename, const TextureDesc& desc) {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // Check for duplicate filename (same file already loaded)
+    size_t filenameHash = std::hash<std::string>{}(filename);
+    auto it = filenameHashToTextureId_.find(filenameHash);
+    if (it != filenameHashToTextureId_.end()) {
+        uint32_t existingId = it->second;
+        TextureMetadata& existing = textures_[existingId];
+        // Verify it's actually the same file (hash collision check)
+        if (existing.filename == filename) {
+            logMessage(LogLevel::Debug, "createTexture: reusing existing texture id=%u for '%s'", existingId, filename.c_str());
+            return TextureHandle{existingId, true, existing.width, existing.height, existing.channels, LoaderError::Success};
+        }
+    }
+
     if (nextTextureId_ >= options_.maxTextures) {
         lastError_ = LoaderError::MaxTexturesExceeded;
         logMessage(LogLevel::Error, "createTexture: max textures exceeded (%zu)", static_cast<size_t>(options_.maxTextures));
@@ -255,6 +268,9 @@ TextureHandle DemandTextureLoader::Impl::createTexture(const std::string& filena
     }
 
     uint32_t id = nextTextureId_++;
+
+    // Register in deduplication map
+    filenameHashToTextureId_[filenameHash] = id;
 
     TextureMetadata& info = textures_[id];
     info.filename = filename;
@@ -312,6 +328,86 @@ TextureHandle DemandTextureLoader::Impl::createTexture(const std::string& filena
 
     lastError_ = LoaderError::Success;
     logMessage(LogLevel::Debug, "createTexture: queued '%s' as id=%u (%dx%d ch=%d)", filename.c_str(), id, info.width, info.height, info.channels);
+    return TextureHandle{id, true, info.width, info.height, info.channels, LoaderError::Success};
+}
+
+TextureHandle DemandTextureLoader::Impl::createTexture(std::shared_ptr<ImageSource> imageSource, const TextureDesc& desc) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!imageSource) {
+        lastError_ = LoaderError::InvalidParameter;
+        logMessage(LogLevel::Error, "createTexture: null ImageSource");
+        return TextureHandle{0, false, 0, 0, 0, lastError_};
+    }
+
+    // First check: same ImageSource pointer already registered
+    ImageSource* rawPtr = imageSource.get();
+    auto ptrIt = imageSourceToTextureId_.find(rawPtr);
+    if (ptrIt != imageSourceToTextureId_.end()) {
+        uint32_t existingId = ptrIt->second;
+        TextureMetadata& existing = textures_[existingId];
+        logMessage(LogLevel::Debug, "createTexture: reusing existing texture id=%u for ImageSource %p", existingId, rawPtr);
+        return TextureHandle{existingId, true, existing.width, existing.height, existing.channels, LoaderError::Success};
+    }
+
+    // Second check: content-based hash deduplication (like OptiX coalesceDuplicateImages)
+    // This catches different ImageSource objects that point to the same underlying image
+    unsigned long long contentHash = imageSource->getHash(0);
+    if (contentHash != 0) {
+        auto hashIt = filenameHashToTextureId_.find(static_cast<size_t>(contentHash));
+        if (hashIt != filenameHashToTextureId_.end()) {
+            uint32_t existingId = hashIt->second;
+            TextureMetadata& existing = textures_[existingId];
+            // Also register pointer mapping for faster future lookups
+            imageSourceToTextureId_[rawPtr] = existingId;
+            logMessage(LogLevel::Debug, "createTexture: reusing existing texture id=%u via content hash", existingId);
+            return TextureHandle{existingId, true, existing.width, existing.height, existing.channels, LoaderError::Success};
+        }
+    }
+
+    if (nextTextureId_ >= options_.maxTextures) {
+        lastError_ = LoaderError::MaxTexturesExceeded;
+        logMessage(LogLevel::Error, "createTexture: max textures exceeded (%zu)", static_cast<size_t>(options_.maxTextures));
+        return TextureHandle{0, false, 0, 0, 0, lastError_};
+    }
+
+    uint32_t id = nextTextureId_++;
+
+    // Register in both deduplication maps
+    imageSourceToTextureId_[rawPtr] = id;
+    if (contentHash != 0) {
+        filenameHashToTextureId_[static_cast<size_t>(contentHash)] = id;
+    }
+
+    TextureMetadata& info = textures_[id];
+    info.imageSource = std::move(imageSource);
+    info.desc = desc;
+    info.resident.store(false, std::memory_order_relaxed);
+    info.loading.store(false, std::memory_order_relaxed);
+
+    // Get image dimensions from ImageSource
+    try {
+        hip_demand::TextureInfo texInfo;
+        info.imageSource->open(&texInfo);
+        if (info.imageSource->isOpen()) {
+            info.width = texInfo.width;
+            info.height = texInfo.height;
+            info.channels = texInfo.numChannels;
+            // Don't close - keep open for later reading, or let ImageSource manage state
+        } else {
+            info.lastError = LoaderError::ImageLoadFailed;
+            logMessage(LogLevel::Warn, "createTexture: failed to open ImageSource");
+        }
+    } catch (const std::exception& e) {
+        info.lastError = LoaderError::ImageLoadFailed;
+        logMessage(LogLevel::Error, "createTexture: ImageSource exception: %s", e.what());
+    } catch (...) {
+        info.lastError = LoaderError::ImageLoadFailed;
+        logMessage(LogLevel::Error, "createTexture: unknown ImageSource exception");
+    }
+
+    lastError_ = LoaderError::Success;
+    logMessage(LogLevel::Debug, "createTexture: queued ImageSource as id=%u (%dx%d ch=%d)", id, info.width, info.height, info.channels);
     return TextureHandle{id, true, info.width, info.height, info.channels, LoaderError::Success};
 }
 
@@ -726,6 +822,7 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
     }
     TextureDesc desc = info.desc;
     std::string filename = info.filename;
+    std::shared_ptr<ImageSource> imageSource = info.imageSource;
     int initWidth = info.width;
     int initHeight = info.height;
     int initChannels = info.channels;
@@ -740,7 +837,82 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
     int height = initHeight;
     int channels = initChannels;
 
-    if (!filename.empty()) {
+    // Priority: 1) user-provided ImageSource, 2) filename, 3) cached memory
+    if (imageSource) {
+        // Load from user-provided ImageSource
+        try {
+            hip_demand::TextureInfo texInfo;
+            if (!imageSource->isOpen()) {
+                imageSource->open(&texInfo);
+            } else {
+                texInfo = imageSource->getInfo();
+            }
+            
+            if (imageSource->isOpen()) {
+                width = texInfo.width;
+                height = texInfo.height;
+                channels = texInfo.numChannels;
+                
+                // Always convert to 4 channels for GPU texture
+                size_t imageSize = width * height * 4;
+                data = new unsigned char[imageSize];
+                needsFree = true;
+                
+                if (channels == 4) {
+                    if (!imageSource->readMipLevel(reinterpret_cast<char*>(data), 0, width, height)) {
+                        delete[] data;
+                        data = nullptr;
+                        needsFree = false;
+                    }
+                } else {
+                    // Read native channels then convert
+                    std::vector<unsigned char> tempData(width * height * channels);
+                    if (imageSource->readMipLevel(reinterpret_cast<char*>(tempData.data()), 0, width, height)) {
+                        for (size_t i = 0; i < static_cast<size_t>(width * height); ++i) {
+                            if (channels == 1) {
+                                data[i*4+0] = tempData[i];
+                                data[i*4+1] = tempData[i];
+                                data[i*4+2] = tempData[i];
+                                data[i*4+3] = 255;
+                            } else if (channels == 3) {
+                                data[i*4+0] = tempData[i*3+0];
+                                data[i*4+1] = tempData[i*3+1];
+                                data[i*4+2] = tempData[i*3+2];
+                                data[i*4+3] = 255;
+                            }
+                        }
+                    } else {
+                        delete[] data;
+                        data = nullptr;
+                        needsFree = false;
+                    }
+                }
+                channels = 4;
+            }
+        } catch (const std::exception& e) {
+            logMessage(LogLevel::Error, "loadTexture: ImageSource exception: %s", e.what());
+            if (data && needsFree) {
+                delete[] data;
+                data = nullptr;
+                needsFree = false;
+            }
+        } catch (...) {
+            logMessage(LogLevel::Error, "loadTexture: unknown ImageSource exception");
+            if (data && needsFree) {
+                delete[] data;
+                data = nullptr;
+                needsFree = false;
+            }
+        }
+        
+        if (!data) {
+            lock.lock();
+            info.loading.store(false, std::memory_order_release);
+            info.lastError = LoaderError::ImageLoadFailed;
+            logMessage(LogLevel::Error, "loadTexture: failed to load from ImageSource");
+            return false;
+        }
+    } else if (!filename.empty()) {
 #ifdef USE_OIIO
         bool oiioSuccess = false;
         try {

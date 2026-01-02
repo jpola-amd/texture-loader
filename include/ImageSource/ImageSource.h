@@ -47,6 +47,12 @@ class ImageSource
 
     /// Returns the time in seconds spent reading image data.
     virtual double getTotalReadTime() const = 0;
+
+    /// Returns a hash that uniquely identifies the image source content.
+    /// Used for deduplication - two ImageSource objects with the same hash
+    /// are assumed to produce identical image data.
+    /// Default implementation returns 0 (no deduplication by content).
+    virtual unsigned long long getHash(hipStream_t stream = 0) const { (void)stream; return 0; }
 };
 
 /// Calculate number of mip levels for given dimensions

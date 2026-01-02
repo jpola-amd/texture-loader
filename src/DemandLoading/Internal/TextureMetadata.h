@@ -5,6 +5,7 @@
 
 #include <hip/hip_runtime.h>
 #include <DemandLoading/DemandTextureLoader.h>
+#include <ImageSource/ImageSource.h>
 
 #include <atomic>
 #include <memory>
@@ -17,6 +18,7 @@ namespace internal {
 /// Contains GPU resources, loading state, and texture properties.
 struct TextureMetadata {
     std::string filename;
+    std::shared_ptr<ImageSource> imageSource;  // Optional: user-provided image source
     TextureDesc desc{};
     
     // GPU resources
@@ -49,6 +51,7 @@ struct TextureMetadata {
     // Move constructor - handles atomic members properly
     TextureMetadata(TextureMetadata&& other) noexcept
         : filename(std::move(other.filename))
+        , imageSource(std::move(other.imageSource))
         , desc(other.desc)
         , texObj(other.texObj)
         , array(other.array)
@@ -71,6 +74,7 @@ struct TextureMetadata {
     TextureMetadata& operator=(TextureMetadata&& other) noexcept {
         if (this != &other) {
             filename = std::move(other.filename);
+            imageSource = std::move(other.imageSource);
             desc = other.desc;
             texObj = other.texObj;
             array = other.array;

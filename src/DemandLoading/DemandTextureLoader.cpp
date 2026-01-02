@@ -38,6 +38,11 @@ TextureHandle DemandTextureLoader::createTexture(const std::string& filename,
     return impl_->createTexture(filename, desc);
 }
 
+TextureHandle DemandTextureLoader::createTexture(std::shared_ptr<ImageSource> imageSource,
+                                                 const TextureDesc& desc) {
+    return impl_->createTexture(std::move(imageSource), desc);
+}
+
 TextureHandle DemandTextureLoader::createTextureFromMemory(const void* data,
                                                            int width, int height, int channels,
                                                            const TextureDesc& desc) {

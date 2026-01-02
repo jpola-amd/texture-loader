@@ -254,6 +254,13 @@ double OIIOReader::getTotalReadTime() const
     return totalReadTime_;
 }
 
+unsigned long long OIIOReader::getHash(hipStream_t /*stream*/) const
+{
+    // Hash the filename for content-based deduplication
+    // Two ImageSource objects with the same filename should return the same hash
+    return static_cast<unsigned long long>(std::hash<std::string>{}(filename_));
+}
+
 // Factory function implementation
 std::unique_ptr<ImageSource> createImageSource(const std::string& filename)
 {

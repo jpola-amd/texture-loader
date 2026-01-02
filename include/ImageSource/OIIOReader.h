@@ -37,6 +37,9 @@ class OIIOReader : public ImageSource
     
     unsigned long long getNumBytesRead() const override;
     double getTotalReadTime() const override;
+    
+    /// Returns a hash based on the filename for deduplication
+    unsigned long long getHash(hipStream_t stream = 0) const override;
 
   private:
     std::string filename_;

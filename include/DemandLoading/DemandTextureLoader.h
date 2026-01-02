@@ -10,6 +10,8 @@
 
 namespace hip_demand {
 
+class ImageSource;  // Forward declaration
+
 // Error codes
 enum class LoaderError {
     Success = 0,
@@ -92,6 +94,11 @@ public:
 
     // Create a texture from file (not loaded until requested)
     TextureHandle createTexture(const std::string& filename, 
+                                const TextureDesc& desc = TextureDesc());
+
+    // Create a texture from an ImageSource (not loaded until requested)
+    // The ImageSource is retained for the lifetime of the texture.
+    TextureHandle createTexture(std::shared_ptr<ImageSource> imageSource,
                                 const TextureDesc& desc = TextureDesc());
     
     // Create a texture from memory
