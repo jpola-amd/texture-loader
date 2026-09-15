@@ -15,6 +15,7 @@ public:
     void* destination = nullptr;
     bool opened = false;
     bool failRead = false;
+    unsigned int failReadLevel = std::numeric_limits<unsigned int>::max();
     unsigned int reads = 0;
     unsigned int baseColorReads = 0;
 
@@ -29,7 +30,7 @@ public:
         destination = dest;
         EXPECT_EQ(width, std::max(1u, info.width >> level));
         EXPECT_EQ(height, std::max(1u, info.height >> level));
-        if (failRead) return false;
+        if (failRead || level == failReadLevel) return false;
         if (mipPixels.empty()) {
             EXPECT_EQ(level, 0u);
             std::memcpy(dest, pixels.data(), pixels.size());

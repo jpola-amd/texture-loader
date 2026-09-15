@@ -208,9 +208,44 @@ inline void linearizeFloatSRGB(ImageData& image) {
 }
 
 inline ImageData downsampleImage(const ImageData& previous, bool srgb = false) {
+    const bool roundBytes = !previous.isFloat() && !srgb;
+    const uint64_t weight = static_cast<uint64_t>(previous.width) * previous.height;
+    if (roundBytes && weight > std::numeric_limits<uint64_t>::max() / 255)
+        throw std::overflow_error("Byte mip weighted sum overflows uint64_t");
     ImageData next;
     next.reset(std::max(1u, previous.width / 2), std::max(1u, previous.height / 2),
                  previous.isFloat());
+    if (roundBytes) {
+        // Scaled integer overlap lengths describe the same area footprint without
+        // moving exact half ties below .5 through floating-point edge arithmetic.
+        for (unsigned int y = 0; y < next.height; ++y) {
+            const uint64_t top = static_cast<uint64_t>(y) * previous.height;
+            const uint64_t bottom = static_cast<uint64_t>(y + 1) * previous.height;
+            for (unsigned int x = 0; x < next.width; ++x) {
+                const uint64_t left = static_cast<uint64_t>(x) * previous.width;
+                const uint64_t right = static_cast<uint64_t>(x + 1) * previous.width;
+                uint64_t sums[4]{};
+                for (uint64_t sy = top / next.height; sy * next.height < bottom; ++sy) {
+                    const uint64_t wy = std::min(bottom, (sy + 1) * next.height) -
+                                        std::max(top, sy * next.height);
+                    for (uint64_t sx = left / next.width; sx * next.width < right; ++sx) {
+                        const uint64_t wx = std::min(right, (sx + 1) * next.width) -
+                                            std::max(left, sx * next.width);
+                        const size_t index = (sy * previous.width + sx) * 4;
+                        for (unsigned int c = 0; c < 4; ++c)
+                            sums[c] += previous.bytes[index + c] * wx * wy;
+                    }
+                }
+                const size_t index = (static_cast<size_t>(y) * next.width + x) * 4;
+                for (unsigned int c = 0; c < 4; ++c) {
+                    const uint64_t rounded = sums[c] / weight +
+                        (sums[c] % weight >= weight / 2 + weight % 2);
+                    next.bytes[index + c] = static_cast<unsigned char>(std::min(rounded, uint64_t{255}));
+                }
+            }
+        }
+        return next;
+    }
     for (unsigned int y = 0; y < next.height; ++y) {
         const double top = static_cast<double>(y) * previous.height / next.height;
         const double bottom = static_cast<double>(y + 1) * previous.height / next.height;
@@ -242,6 +277,7 @@ inline ImageData downsampleImage(const ImageData& previous, bool srgb = false) {
                     next.bytes[index] = static_cast<unsigned char>(std::clamp(
                         std::lround(linearToSRGB(static_cast<float>(sum / totalWeight)) * 255.f), 0l, 255l));
                 else
+                    // Preserve the existing truncation of alpha in sRGB byte images.
                     next.bytes[index] = static_cast<unsigned char>(sum / totalWeight);
             }
         }

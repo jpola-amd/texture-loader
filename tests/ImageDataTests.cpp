@@ -98,12 +98,12 @@ TEST(ImageDataTest, FloatMipPreservesHDRAndRectangularAccounting) {
     EXPECT_EQ(internal::mipImageByteSize(image, 2), (4u + 2u) * 16);
 }
 
-TEST(ImageDataTest, ByteMipPreservesIntegerFiltering) {
+TEST(ImageDataTest, ByteMipRoundsHalfUp) {
     internal::ImageData image;
     image.reset(2, 2, false);
     image.bytes = {1, 3, 5, 255, 2, 4, 6, 255, 3, 5, 7, 255, 4, 6, 8, 255};
     auto next = internal::downsampleImage(image);
-    EXPECT_EQ(next.bytes, (std::vector<unsigned char>{2, 4, 6, 255}));
+    EXPECT_EQ(next.bytes, (std::vector<unsigned char>{3, 5, 7, 255}));
     EXPECT_EQ(internal::mipImageByteSize(image, 2), 20u);
 }
 
@@ -171,6 +171,186 @@ TEST(ImageDataTest, GeneratedByteSRGBMipFiltersInLinearSpace) {
     image.floats = {0, 0, 0, 1, 1, 1, 1, 1};
     next = internal::downsampleImage(image, true);
     EXPECT_FLOAT_EQ(next.floats[0], .5f);
+}
+
+TEST(ImageDataTest, ByteMipQuarterAndHalfFootprintsAcrossRGBA) {
+    for (unsigned int offset : {0u, 17u, 127u, 254u}) {
+        for (unsigned int channel = 0; channel < 4; ++channel) {
+            for (unsigned int ones = 1; ones <= 3; ++ones) {
+                SCOPED_TRACE(::testing::Message() << offset << " channel=" << channel << " ones=" << ones);
+                internal::ImageData image;
+                image.reset(2, 2, false);
+                std::vector<unsigned char> expected{31, 63, 127, 255};
+                for (unsigned int pixel = 0; pixel < 4; ++pixel) {
+                    std::copy(expected.begin(), expected.end(), image.bytes.begin() + pixel * 4);
+                    image.bytes[pixel * 4 + channel] = static_cast<unsigned char>(offset + (pixel < ones));
+                }
+                expected[channel] = static_cast<unsigned char>(offset + (ones >= 2));
+                EXPECT_EQ(internal::downsampleImage(image).bytes, expected);
+            }
+        }
+    }
+}
+
+TEST(ImageDataTest, ByteMipJustBelowAndAboveHalf) {
+    // The first 511 -> 255 footprint has weights 1, 1, 1/255.
+    // Its means are offset + 255/511 and offset + 256/511.
+    for (bool vertical : {false, true}) {
+        for (unsigned char offset : {0, 17, 127, 254}) {
+            for (bool above : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << vertical << " offset=" << int(offset) << " above=" << above);
+                internal::ImageData image;
+                image.reset(vertical ? 1 : 511, vertical ? 511 : 1, false);
+                std::fill(image.bytes.begin(), image.bytes.end(), offset);
+                for (unsigned int channel = 0; channel < 4; ++channel) {
+                    ++image.bytes[channel];
+                    image.bytes[8 + channel] += above ? 1 : 0;
+                }
+                const auto next = internal::downsampleImage(image);
+                for (unsigned int channel = 0; channel < 4; ++channel)
+                    EXPECT_EQ(next.bytes[channel], offset + (above ? 1 : 0));
+            }
+        }
+    }
+}
+
+TEST(ImageDataTest, ByteMipOddAndThinFootprintsMatchExactAreaReference) {
+    for (unsigned int width : {1u, 2u, 3u, 4u, 5u, 7u, 9u}) {
+        for (unsigned int height : {1u, 2u, 3u, 4u, 5u, 6u, 9u}) {
+            SCOPED_TRACE(::testing::Message() << width << "x" << height);
+            internal::ImageData image;
+            image.reset(width, height, false);
+            for (size_t i = 0; i < image.bytes.size(); ++i)
+                image.bytes[i] = static_cast<unsigned char>((i * 47 + i / 4 * 13) % 256);
+            const auto next = internal::downsampleImage(image);
+            EXPECT_EQ(next.width, std::max(1u, width / 2));
+            EXPECT_EQ(next.height, std::max(1u, height / 2));
+            // Integer overlap lengths in a scaled grid avoid sharing floating-point
+            // footprint arithmetic or quantization with the implementation.
+            for (unsigned int y = 0; y < next.height; ++y) {
+                for (unsigned int x = 0; x < next.width; ++x) {
+                    for (unsigned int channel = 0; channel < 4; ++channel) {
+                        uint64_t sum = 0;
+                        for (unsigned int sy = 0; sy < height; ++sy) {
+                            const int wy = std::max(0, int(std::min((y + 1) * height, (sy + 1) * next.height)) -
+                                                       int(std::max(y * height, sy * next.height)));
+                            for (unsigned int sx = 0; sx < width; ++sx) {
+                                const int wx = std::max(0, int(std::min((x + 1) * width, (sx + 1) * next.width)) -
+                                                           int(std::max(x * width, sx * next.width)));
+                                sum += uint64_t(wx) * wy * image.bytes[(sy * width + sx) * 4 + channel];
+                            }
+                        }
+                        const uint64_t weight = uint64_t(width) * height;
+                        EXPECT_EQ(next.bytes[(y * next.width + x) * 4 + channel],
+                                  (2 * sum + weight) / (2 * weight));
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(ImageDataTest, ByteMipWeightedSumOverflowIsRejectedBeforeAllocation) {
+    internal::ImageData image;
+    image.width = image.height = std::numeric_limits<int>::max();
+    EXPECT_THROW(internal::downsampleImage(image), std::overflow_error);
+}
+
+TEST(ImageDataTest, ByteMipConstantChainsAndSingletonStayExact) {
+    for (unsigned char value : {0, 1, 127, 255}) {
+        for (const auto& shape : {std::pair{1u, 1u}, {9u, 1u}, {1u, 9u}, {7u, 5u}, {16u, 16u}}) {
+            internal::ImageData image;
+            image.reset(shape.first, shape.second, false);
+            std::fill(image.bytes.begin(), image.bytes.end(), value);
+            const unsigned int levels = calculateNumMipLevels(image.width, image.height);
+            EXPECT_EQ(internal::downsampleImage(image).isFloat(), false);
+            for (unsigned int level = 1; level < levels; ++level) {
+                image = internal::downsampleImage(image);
+                EXPECT_EQ(image.bytes, std::vector<unsigned char>(image.width * image.height * 4, value));
+            }
+            EXPECT_EQ(image.width, 1u);
+            EXPECT_EQ(image.height, 1u);
+            EXPECT_EQ(internal::downsampleImage(image).bytes, image.bytes);
+        }
+    }
+}
+
+TEST(ImageDataTest, ByteMipRecursiveRoundingIsNotDirectBaseReduction) {
+    internal::ImageData image;
+    image.reset(4, 4, false);
+    std::fill_n(image.bytes.begin(), 4 * 4, 1);
+    const auto first = internal::downsampleImage(image);
+    EXPECT_EQ(first.bytes, (std::vector<unsigned char>{1, 1, 1, 1, 1, 1, 1, 1,
+                                                      0, 0, 0, 0, 0, 0, 0, 0}));
+    const auto last = internal::downsampleImage(first);
+    EXPECT_EQ(last.bytes, (std::vector<unsigned char>{1, 1, 1, 1}));
+    // Rounding the original mean of 1/4 directly would instead produce zero.
+    for (unsigned int y = 0; y < 4; ++y)
+        for (unsigned int x = 0; x < 4; ++x)
+            for (unsigned int channel = 0; channel < 4; ++channel)
+                image.bytes[(y * 4 + x) * 4 + channel] = (x + y) % 2;
+    const auto alternating = internal::downsampleImage(image);
+    EXPECT_EQ(alternating.bytes, std::vector<unsigned char>(16, 1));
+    EXPECT_EQ(internal::downsampleImage(alternating).bytes, last.bytes);
+}
+
+TEST(ImageDataTest, ByteSRGBFractionalAlphaStillTruncates) {
+    for (unsigned char offset : {0, 17, 127, 254}) {
+        for (unsigned int ones = 1; ones <= 3; ++ones) {
+            internal::ImageData image;
+            image.reset(2, 2, false);
+            for (unsigned int pixel = 0; pixel < 4; ++pixel) {
+                for (unsigned int channel = 0; channel < 3; ++channel)
+                    image.bytes[pixel * 4 + channel] = pixel < 2 ? 0 : 255;
+                image.bytes[pixel * 4 + 3] = static_cast<unsigned char>(offset + (pixel < ones));
+            }
+            EXPECT_EQ(internal::downsampleImage(image, true).bytes,
+                      (std::vector<unsigned char>{188, 188, 188, offset}));
+            EXPECT_EQ(internal::downsampleImage(image, false).bytes[3], offset + (ones >= 2));
+        }
+    }
+}
+
+TEST(ImageDataTest, GeneratedNonByteMipsKeepFloatPrecision) {
+    for (unsigned int format = 1; format < formats.size(); ++format) {
+        for (unsigned int channels = 1; channels <= 4; ++channels) {
+            SCOPED_TRACE(::testing::Message() << "format=" << format << " channels=" << channels);
+            auto source = makeSource(format, channels);
+            internal::ImageData image;
+            ASSERT_TRUE(internal::readImageSource(source, image));
+            const auto next = internal::downsampleImage(image);
+            ASSERT_TRUE(next.isFloat());
+            EXPECT_TRUE(next.bytes.empty());
+            EXPECT_EQ(next.width, 1u);
+            EXPECT_EQ(next.height, 1u);
+            for (unsigned int channel = 0; channel < 4; ++channel) {
+                double sum = 0;
+                for (unsigned int pixel = 0; pixel < 6; ++pixel)
+                    sum += image.floats[pixel * 4 + channel];
+                EXPECT_FLOAT_EQ(next.floats[channel], static_cast<float>(sum / 6));
+            }
+            EXPECT_EQ(internal::downsampleImage(image, true).floats, next.floats);
+        }
+    }
+}
+
+TEST(ImageDataTest, AuthoredByteMipsRemainExactAndSeedMissingLevels) {
+    auto source = makeAuthoredMipSource(false);
+    for (unsigned int level : {3u, 1u, 0u, 2u}) {
+        internal::ImageData image;
+        ASSERT_TRUE(internal::readImageSource(source, image, level));
+        EXPECT_EQ(image.bytes, source.mipPixels[level]);
+        const auto generated = internal::downsampleImage(image);
+        for (size_t pixel = 0; pixel < generated.bytes.size() / 4; ++pixel)
+            for (unsigned int channel = 0; channel < 4; ++channel)
+                EXPECT_EQ(generated.bytes[pixel * 4 + channel], authoredByteMipColors[level][channel]);
+    }
+    internal::ImageData image;
+    source.failRead = true;
+    EXPECT_FALSE(internal::readImageSource(source, image, 1));
+    source.failRead = false;
+    ASSERT_TRUE(internal::readImageSource(source, image, 1));
+    EXPECT_EQ(image.bytes, source.mipPixels[1]);
 }
 
 } // namespace

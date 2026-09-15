@@ -568,6 +568,54 @@ protected:
     bool observedKnownIssue_ = false;
 };
 
+TEST_P(MipFilteringTest, GeneratedByteRoundingKeepsSpatialAndMipModesIndependent) {
+    auto source = std::make_shared<TypedImageSource>(makeBoundaryPatternSource(false));
+    TypedImageSource reference = *source;
+    reference.info.numMipLevels = calculateNumMipLevels(reference.info.width, reference.info.height);
+    reference.mipPixels.push_back(reference.pixels);
+    auto image = internal::decodeImagePixels(source->pixels.data(), source->info);
+    for (unsigned int level = 1; level < reference.info.numMipLevels; ++level) {
+        image = internal::downsampleImage(image);
+        reference.mipPixels.push_back(image.bytes);
+    }
+    const auto desc = descriptor();
+    TextureHandle handle;
+    hipTextureObject_t texture{};
+    ASSERT_NO_FATAL_FAILURE(requestAndLoad(source, desc, handle, texture));
+    ASSERT_NO_FATAL_FAILURE(verifyStorage(reference, texture, true));
+    const bool point = desc.mipmapFilterMode == hipFilterModePoint;
+    // Half-way linear weights are exact and distinct from the known quarter-LOD
+    // runtime defect covered by the existing qualification tests below.
+    const std::vector<float> lods = point ? std::vector<float>{0, .25f, .75f, 1, 1.25f, 1.75f, 2}
+                                          : std::vector<float>{0, .5f, 1, 1.5f, 2};
+    std::vector<SamplingInput> inputs;
+    std::vector<std::array<float, 4>> expected;
+    for (float lod : lods) {
+        for (float u : {-.125f, .1875f, .5f, .875f, 1.125f}) {
+            for (float v : {.25f, .5625f}) {
+                inputs.push_back(inputFor(handle.id, SamplingPath::Lod, u, v, lod));
+                const auto lower = static_cast<unsigned int>(std::floor(lod + (point ? .5f : 0)));
+                const auto upper = point ? lower : std::min(lower + 1, reference.info.numMipLevels - 1);
+                const float fraction = point ? 0 : lod - lower;
+                const auto first = spatialPixel(reference, lower, u, v, desc);
+                const auto second = spatialPixel(reference, upper, u, v, desc);
+                std::array<float, 4> value{};
+                for (unsigned int c = 0; c < 4; ++c)
+                    value[c] = first[c] + fraction * (second[c] - first[c]);
+                expected.push_back(value);
+            }
+        }
+    }
+    std::vector<SamplingResult> results;
+    ASSERT_EQ(harness_.sample(loader_->getDeviceContext(), inputs, results), hipSuccess);
+    ASSERT_EQ(results.size(), expected.size());
+    for (size_t i = 0; i < results.size(); ++i) {
+        SCOPED_TRACE(i);
+        expectSample(results[i], expected[i]);
+    }
+    EXPECT_EQ(source->readLevels, (std::vector<unsigned int>{0}));
+}
+
 TEST_P(MipFilteringTest, AuthoredChainSamplerStateAndReload) {
     for (unsigned int limit : {0u, 1u, 3u, std::numeric_limits<unsigned int>::max()}) {
         auto source = std::make_shared<TypedImageSource>(makeFilteringMipSource());
