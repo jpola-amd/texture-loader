@@ -298,13 +298,50 @@ __global__ void myKernel(hip_demand::DeviceContext ctx, uint32_t texId) {
 
 ### Error Handling
 
-All HIP API calls are checked. Query errors:
+Check each registration's returned result before publishing its ID:
+
+```cpp
+const auto texture = loader.createTexture("texture.png");
+if (!texture.valid || texture.error != hip_demand::LoaderError::Success ||
+    texture.id == hip_demand::InvalidTextureId) {
+    std::cerr << "Registration failed: " << hip_demand::getErrorString(texture.error) << "\n";
+} else {
+    // Publish texture.id to the application's sampler table.
+}
+```
+
+Texture zero is valid. Default and failed handles use `InvalidTextureId`
+(`UINT32_MAX`), with `valid=false` and a non-success error; the result layout
+is unchanged. Failed registration does not consume capacity or leave lookup
+aliases. Unload and priority updates reject unregistered/out-of-range IDs.
+Device sampling of the invalid sentinel returns the supplied default color
+with `false` and records no demand.
+
+`maxTextures` and `maxRequestsPerLaunch` must each be in `[1, UINT32_MAX]`
+and fit the host allocation representation. At capacity 4096, registrations
+use IDs 0 through 4095; a new 4097th registration fails. Existing filename,
+source-pointer, or nonzero-content-hash registrations may still be reused
+when full. Memory registrations remain distinct. IDs are not recycled.
+
+Filename registration remains lazy: missing/unreadable files may register
+successfully and fail later during demand loading. An ImageSource's metadata
+is opened/validated at registration; invalid metadata, closed sources, and
+standard exceptions from source opening/hashing fail explicitly without
+publishing a registration. Pixels are still read only on demand.
+
+Check initialization and operational diagnostics separately:
 
 ```cpp
 if (loader.getLastError() != hip_demand::LoaderError::Success) {
     std::cerr << "Error: " << hip_demand::getErrorString(loader.getLastError()) << "\n";
 }
 ```
+
+`getLastError()` is diagnostic state, not the result of a particular
+registration. A deduplicated success can leave an earlier error there.
+Registration success and ticket completion do not guarantee residency or
+successful sampling. A failed loader initialization cannot register textures
+and returns an empty device context.
 
 Error codes: `Success`, `InvalidTextureId`, `MaxTexturesExceeded`, `FileNotFound`, `ImageLoadFailed`, `OutOfMemory`, `InvalidParameter`, `HipError`
 

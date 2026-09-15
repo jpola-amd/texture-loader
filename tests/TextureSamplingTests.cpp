@@ -141,6 +141,15 @@ protected:
     TextureSamplingHarness harness_;
 };
 
+
+/**
+ * Test case for authored mipmaps with explicit LOD and gradient sampling paths.
+ * This is not working as expected on Windows. 
+ * The mixing betwen the authored mipmaps and the explicit LOD sampling seems to cause incorrect results.
+ * At least it is not linear as expected 
+ * SWDEV-608984
+ * 
+ */
 TEST_P(LegacyTextureSamplingTest, AuthoredMipExplicitLodAndGradient) {
     auto source = std::make_shared<TypedImageSource>(makeAuthoredMipSource(GetParam()));
     TextureDesc desc;
