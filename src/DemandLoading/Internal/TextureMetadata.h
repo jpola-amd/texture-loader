@@ -46,6 +46,8 @@ struct TextureMetadata {
     std::atomic<bool> loading{false};
     
     LoaderError lastError = LoaderError::Success;
+    hipError_t primaryHipError = hipSuccess;
+    hipError_t cleanupHipError = hipSuccess;
     
     // Cached data for memory-based textures
     std::unique_ptr<uint8_t[]> cachedData;
@@ -73,6 +75,8 @@ struct TextureMetadata {
         , resident(other.resident.load(std::memory_order_relaxed))
         , loading(other.loading.load(std::memory_order_relaxed))
         , lastError(other.lastError)
+        , primaryHipError(other.primaryHipError)
+        , cleanupHipError(other.cleanupHipError)
         , cachedData(std::move(other.cachedData))
     {}
     
@@ -97,6 +101,8 @@ struct TextureMetadata {
             resident.store(other.resident.load(std::memory_order_relaxed), std::memory_order_relaxed);
             loading.store(other.loading.load(std::memory_order_relaxed), std::memory_order_relaxed);
             lastError = other.lastError;
+            primaryHipError = other.primaryHipError;
+            cleanupHipError = other.cleanupHipError;
             cachedData = std::move(other.cachedData);
         }
         return *this;

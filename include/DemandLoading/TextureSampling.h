@@ -65,6 +65,7 @@ __device__ __forceinline__ bool isTextureResident(const DeviceContext& ctx, uint
 // Record a texture request with wave-level deduplication to reduce atomic contention.
 // On AMD GPUs, this uses native wave intrinsics for efficient deduplication.
 __device__ __forceinline__ void recordTextureRequest(const DeviceContext& ctx, uint32_t texId) {
+    if (texId >= ctx.maxTextures) return;
     // Early-out if overflow already flagged to reduce global memory traffic.
     // Use __atomic_load_n for a true atomic load (no read-modify-write overhead).
     if (__atomic_load_n(ctx.requestOverflow, __ATOMIC_RELAXED) != 0u) return;

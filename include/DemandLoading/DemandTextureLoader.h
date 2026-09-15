@@ -45,8 +45,8 @@ enum class EvictionPriority {
 // Configuration options
 struct LoaderOptions {
     size_t maxTextureMemory = 2ULL * 1024 * 1024 * 1024;  // 2 GB default
-    size_t maxTextures = 4096;
-    size_t maxRequestsPerLaunch = 1024;
+    size_t maxTextures = 4096;  // 1..UINT32_MAX; UINT32_MAX is never a texture ID
+    size_t maxRequestsPerLaunch = 1024;  // 1..UINT32_MAX
     bool enableEviction = true;
     unsigned int maxThreads = 0;  // 0 = auto
     unsigned int minResidentFrames = 3;  // Thrashing prevention: don't evict textures younger than this
@@ -77,13 +77,15 @@ inline bool operator==(const TextureDesc& a, const TextureDesc& b) {
 }
 
 // Texture information returned after creation
+inline constexpr uint32_t InvalidTextureId = UINT32_MAX;
+
 struct TextureHandle {
-    uint32_t id = 0;
+    uint32_t id = InvalidTextureId;
     bool valid = false;
     int width = 0;
     int height = 0;
     int channels = 0;
-    LoaderError error = LoaderError::Success;
+    LoaderError error = LoaderError::InvalidTextureId;
 };
 
 class DemandTextureLoader {
@@ -99,7 +101,8 @@ public:
     TextureHandle createTexture(const std::string& filename, 
                                 const TextureDesc& desc = TextureDesc());
 
-    // Create a texture from an ImageSource (not loaded until requested)
+    // Create a texture from an ImageSource (pixels not loaded until requested).
+    // Invalid metadata or an exception while opening/hashing fails registration.
     // The ImageSource is retained for the lifetime of the texture.
     TextureHandle createTexture(std::shared_ptr<ImageSource> imageSource,
                                 const TextureDesc& desc = TextureDesc());
@@ -139,7 +142,7 @@ public:
     /// Use this to adjust priorities based on camera distance, LOD importance, etc.
     void updateEvictionPriority(uint32_t textureId, EvictionPriority priority);
 
-    // Utility
+    // Utility. Invalid/unregistered IDs set InvalidTextureId without mutation.
     void unloadTexture(uint32_t textureId);
     void unloadAll();
 

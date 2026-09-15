@@ -29,6 +29,38 @@ namespace hip_demand {
 using internal::TextureMetadata;
 using internal::RequestStats;
 using internal::calculateMipLevels;
+using internal::HipOperation;
+
+namespace {
+bool validDescriptor(const TextureDesc& desc) {
+    const auto validAddress = [](hipTextureAddressMode mode) {
+        return mode == hipAddressModeWrap || mode == hipAddressModeClamp ||
+               mode == hipAddressModeMirror || mode == hipAddressModeBorder;
+    };
+    const auto validFilter = [](hipTextureFilterMode mode) {
+        return mode == hipFilterModePoint || mode == hipFilterModeLinear;
+    };
+    return validAddress(desc.addressMode[0]) && validAddress(desc.addressMode[1]) &&
+           validFilter(desc.filterMode) && validFilter(desc.mipmapFilterMode) &&
+           (desc.evictionPriority == EvictionPriority::Normal || desc.evictionPriority == EvictionPriority::Low ||
+            desc.evictionPriority == EvictionPriority::High || desc.evictionPriority == EvictionPriority::KeepResident);
+}
+
+LoaderError hipLoaderError(hipError_t error) {
+    return error == hipErrorOutOfMemory ? LoaderError::OutOfMemory : LoaderError::HipError;
+}
+
+void validateRegistrationImage(const TextureInfo& info) {
+    if (!info.isValid)
+        throw std::invalid_argument("Invalid source metadata");
+    const size_t sourceBytes = internal::imageByteSize(info.width, info.height, info.numChannels,
+                                                       getBytesPerChannel(info.format));
+    const size_t uploadBytes = internal::imageByteSize(info.width, info.height, 4,
+        info.format == HIP_AD_FORMAT_UNSIGNED_INT8 ? 1 : sizeof(float));
+    if (std::max(sourceBytes, uploadBytes) > static_cast<size_t>(PTRDIFF_MAX))
+        throw std::overflow_error("Image exceeds addressable buffer representation");
+}
+}
 
 // -----------------------------------------------------------------------------
 // Constructor / Destructor
@@ -37,105 +69,84 @@ using internal::calculateMipLevels;
 DemandTextureLoader::Impl::Impl(const LoaderOptions& options)
     : options_(options), device_(0)
 {
-    hipError_t err = hipGetDevice(&device_);
-    if (err != hipSuccess) {
-        lastError_ = LoaderError::HipError;
-        return;
+    try {
+        initializationError_ = initialize();
+    } catch (const std::bad_alloc&) {
+        initializationError_ = LoaderError::OutOfMemory;
+    }
+    lastError_ = initializationError_;
+    if (initializationError_ != LoaderError::Success)
+        logMessage(LogLevel::Error, "Loader initialization failed: %s", getErrorString(initializationError_));
+}
+
+LoaderError DemandTextureLoader::Impl::initialize() {
+    if (options_.maxTextures == 0 || options_.maxTextures > UINT32_MAX ||
+        options_.maxRequestsPerLaunch == 0 || options_.maxRequestsPerLaunch > UINT32_MAX ||
+        options_.maxTextures > SIZE_MAX / sizeof(TextureObject) ||
+        options_.maxRequestsPerLaunch > SIZE_MAX / sizeof(uint32_t) ||
+        options_.maxTextures > textures_.max_size()) {
+        return LoaderError::InvalidParameter;
     }
 
-    // Create dedicated stream for async request copies.
+    hipError_t err = hipCalls_.call(HipOperation::GetDevice, [&] { return hipGetDevice(&device_); });
+    if (err != hipSuccess) return hipLoaderError(err);
+    deviceKnown_ = true;
     err = hipStreamCreateWithFlags(&requestCopyStream_, hipStreamNonBlocking);
-    if (err != hipSuccess) {
-        lastError_ = LoaderError::HipError;
-        return;
-    }
+    if (err != hipSuccess) return hipLoaderError(err);
 
-    // Allocate device memory for request buffer
-    err = hipMalloc(&deviceContext_.requests, options_.maxRequestsPerLaunch * sizeof(uint32_t));
-    if (err != hipSuccess) {
-        lastError_ = LoaderError::OutOfMemory;
-        return;
-    }
+    err = hipCalls_.call(HipOperation::DeviceAllocation, [&] {
+        return hipMalloc(&deviceContext_.requests, options_.maxRequestsPerLaunch * sizeof(uint32_t));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
+    err = hipCalls_.call(HipOperation::DeviceAllocation, [&] {
+        return hipMalloc(&deviceContext_.textures, options_.maxTextures * sizeof(TextureObject));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
 
-    // Allocate device memory for texture array
-    err = hipMalloc(&deviceContext_.textures, options_.maxTextures * sizeof(TextureObject));
-    if (err != hipSuccess) {
-        lastError_ = LoaderError::OutOfMemory;
-        HIP_CHECK(hipFree(deviceContext_.requests));
-        deviceContext_.requests = nullptr;
-        return;
-    }
+    const size_t flagWords = options_.maxTextures / 32 + (options_.maxTextures % 32 != 0);
+    err = hipCalls_.call(HipOperation::DeviceAllocation, [&] {
+        return hipMalloc(&deviceContext_.residentFlags, flagWords * sizeof(uint32_t));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
 
-    // Allocate device memory for resident flags (32 textures per word)
-    size_t flagWords = (options_.maxTextures + 31) / 32;
-    err = hipMalloc(&deviceContext_.residentFlags, flagWords * sizeof(uint32_t));
-    if (err != hipSuccess) {
-        lastError_ = LoaderError::OutOfMemory;
-        HIP_CHECK(hipFree(deviceContext_.requests));
-        HIP_CHECK(hipFree(deviceContext_.textures));
-        deviceContext_.requests = nullptr;
-        deviceContext_.textures = nullptr;
-        return;
-    }
-
-    err = hipMalloc(&d_requestStats_, sizeof(RequestStats));
-    if (err != hipSuccess) {
-        lastError_ = LoaderError::OutOfMemory;
-        HIP_CHECK(hipFree(deviceContext_.requests));
-        HIP_CHECK(hipFree(deviceContext_.textures));
-        HIP_CHECK(hipFree(deviceContext_.residentFlags));
-        deviceContext_.requests = nullptr;
-        deviceContext_.textures = nullptr;
-        deviceContext_.residentFlags = nullptr;
-        return;
-    }
+    err = hipCalls_.call(HipOperation::DeviceAllocation, [&] {
+        return hipMalloc(&d_requestStats_, sizeof(RequestStats));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
     deviceContext_.requestCount = reinterpret_cast<uint32_t*>(d_requestStats_);
     deviceContext_.requestOverflow = deviceContext_.requestCount + 1;
 
-    // Initialize to zero
-    err = hipMemset(deviceContext_.residentFlags, 0, flagWords * sizeof(uint32_t));
-    if (err != hipSuccess) lastError_ = LoaderError::HipError;
-
-    err = hipMemset(deviceContext_.textures, 0, options_.maxTextures * sizeof(TextureObject));
-    if (err != hipSuccess) lastError_ = LoaderError::HipError;
-
-    err = hipMemset(d_requestStats_, 0, sizeof(RequestStats));
-    if (err != hipSuccess) lastError_ = LoaderError::HipError;
-
-    // Set limits
-    deviceContext_.maxTextures = options_.maxTextures;
-    deviceContext_.maxRequests = options_.maxRequestsPerLaunch;
+    err = hipCalls_.call(HipOperation::Initialize, [&] {
+        return hipMemset(deviceContext_.residentFlags, 0, flagWords * sizeof(uint32_t));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
+    err = hipCalls_.call(HipOperation::Initialize, [&] {
+        return hipMemset(deviceContext_.textures, 0, options_.maxTextures * sizeof(TextureObject));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
+    err = hipCalls_.call(HipOperation::Initialize, [&] {
+        return hipMemset(d_requestStats_, 0, sizeof(RequestStats));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
 
     // Allocate host pinned buffers for async copies
     flagWordCount_ = flagWords;
-    if (hipHostMalloc(reinterpret_cast<void**>(&h_residentFlags_), flagWords * sizeof(uint32_t)) != hipSuccess) {
-        lastError_ = LoaderError::OutOfMemory;
-        return;
-    }
-    if (hipHostMalloc(reinterpret_cast<void**>(&h_textures_), options_.maxTextures * sizeof(TextureObject)) != hipSuccess) {
-        lastError_ = LoaderError::OutOfMemory;
-        HIP_CHECK(hipHostFree(h_residentFlags_));
-        h_residentFlags_ = nullptr;
-        return;
-    }
-    if (hipHostMalloc(reinterpret_cast<void**>(&h_requests_), options_.maxRequestsPerLaunch * sizeof(uint32_t)) != hipSuccess) {
-        lastError_ = LoaderError::OutOfMemory;
-        HIP_CHECK(hipHostFree(h_residentFlags_));
-        HIP_CHECK(hipHostFree(h_textures_));
-        h_residentFlags_ = nullptr;
-        h_textures_ = nullptr;
-        return;
-    }
-    if (hipHostMalloc(reinterpret_cast<void**>(&h_requestStats_), sizeof(RequestStats)) != hipSuccess) {
-        lastError_ = LoaderError::OutOfMemory;
-        HIP_CHECK(hipHostFree(h_residentFlags_));
-        HIP_CHECK(hipHostFree(h_textures_));
-        HIP_CHECK(hipHostFree(h_requests_));
-        h_residentFlags_ = nullptr;
-        h_textures_ = nullptr;
-        h_requests_ = nullptr;
-        return;
-    }
+    err = hipCalls_.call(HipOperation::HostAllocation, [&] {
+        return hipHostMalloc(reinterpret_cast<void**>(&h_residentFlags_), flagWords * sizeof(uint32_t));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
+    err = hipCalls_.call(HipOperation::HostAllocation, [&] {
+        return hipHostMalloc(reinterpret_cast<void**>(&h_textures_), options_.maxTextures * sizeof(TextureObject));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
+    err = hipCalls_.call(HipOperation::HostAllocation, [&] {
+        return hipHostMalloc(reinterpret_cast<void**>(&h_requests_), options_.maxRequestsPerLaunch * sizeof(uint32_t));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
+    err = hipCalls_.call(HipOperation::HostAllocation, [&] {
+        return hipHostMalloc(reinterpret_cast<void**>(&h_requestStats_), sizeof(RequestStats));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
 
     std::fill_n(h_residentFlags_, flagWords, 0u);
     std::fill_n(h_textures_, options_.maxTextures, static_cast<TextureObject>(0));
@@ -161,9 +172,17 @@ DemandTextureLoader::Impl::Impl(const LoaderOptions& options)
 
     // Create HIP event pool for async operations (pre-allocate 4 events)
     hipEventPool_ = std::make_unique<internal::HipEventPool>(4);
+    deviceContext_.maxTextures = static_cast<uint32_t>(options_.maxTextures);
+    deviceContext_.maxRequests = static_cast<uint32_t>(options_.maxRequestsPerLaunch);
+    return LoaderError::Success;
 }
 
 DemandTextureLoader::Impl::~Impl() {
+    if (deviceKnown_) {
+        const hipError_t err = hipSetDevice(device_);
+        if (err != hipSuccess)
+            logMessage(LogLevel::Error, "Loader teardown: device selection failed: %s", hipGetErrorString(err));
+    }
     // Ensure any async request-processing tasks complete before we start tearing down
     // resources they might touch (e.g., mutex_, textures_, options_, logging).
     // Use seq_cst to establish a total order with the check in processRequestsAsync.
@@ -249,102 +268,69 @@ void DemandTextureLoader::Impl::markResidentWordDirtyLocked(uint32_t wordIdx) {
 
 TextureHandle DemandTextureLoader::Impl::createTexture(const std::string& filename, const TextureDesc& desc) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (initializationError_ != LoaderError::Success)
+        return registrationFailure(initializationError_);
+    if (filename.empty() || filename.find('\0') != std::string::npos || !validDescriptor(desc))
+        return registrationFailure(LoaderError::InvalidParameter);
 
-    // Check for duplicate filename (same file already loaded)
-    size_t filenameHash = std::hash<std::string>{}(filename);
-    auto it = filenameHashToTextureId_.find(filenameHash);
-    if (it != filenameHashToTextureId_.end()) {
-        uint32_t existingId = it->second;
-        TextureMetadata& existing = textures_[existingId];
-        // Verify it's actually the same file (hash collision check)
-        if (existing.filename == filename) {
-            logMessage(LogLevel::Debug, "createTexture: reusing existing texture id=%u for '%s'", existingId, filename.c_str());
-            return TextureHandle{existingId, true, existing.width, existing.height, existing.channels, LoaderError::Success};
-        }
+    auto it = filenameToTextureId_.find(filename);
+    if (it != filenameToTextureId_.end()) {
+        const auto& existing = textures_[it->second];
+        return {it->second, true, existing.width, existing.height, existing.channels, LoaderError::Success};
     }
+    if (nextTextureId_ >= options_.maxTextures)
+        return registrationFailure(LoaderError::MaxTexturesExceeded);
 
-    if (nextTextureId_ >= options_.maxTextures) {
-        lastError_ = LoaderError::MaxTexturesExceeded;
-        logMessage(LogLevel::Error, "createTexture: max textures exceeded (%zu)", static_cast<size_t>(options_.maxTextures));
-        return TextureHandle{0, false, 0, 0, 0, lastError_};
-    }
-
-    uint32_t id = nextTextureId_++;
-
-    // Register in deduplication map
-    filenameHashToTextureId_[filenameHash] = id;
-
-    TextureMetadata& info = textures_[id];
-    info.filename = filename;
-    info.uploadBytesPerPixel = stbi_is_hdr(filename.c_str()) || stbi_is_16_bit(filename.c_str()) ? 16 : 4;
-    info.desc = desc;
-    info.resident.store(false, std::memory_order_relaxed);
-    info.loading.store(false, std::memory_order_relaxed);
-
-    // Try to get image dimensions without loading
-#ifdef USE_OIIO
-    // Try OIIO first for better format support
     try {
-        std::unique_ptr<ImageSource> imgSrc = createImageSource(filename);
-        if (imgSrc) {
-            hip_demand::TextureInfo texInfo;
-            imgSrc->open(&texInfo);
-            if (imgSrc->isOpen()) {
-                info.width = texInfo.width;
-                info.height = texInfo.height;
-                info.channels = texInfo.numChannels;
-                info.uploadBytesPerPixel = texInfo.format == HIP_AD_FORMAT_UNSIGNED_INT8 ? 4 : 16;
-                // Keep the opened source so estimates use its actual format
-                // and uploads can consume its supplied mip levels.
-                info.imageSource = std::move(imgSrc);
-            } else {
-                // Fall back to stb_image
-                int w, h, c;
-                if (stbi_info(filename.c_str(), &w, &h, &c)) {
-                    info.width = w;
-                    info.height = h;
-                    info.channels = c;
-                } else {
-                    info.lastError = LoaderError::FileNotFound;
+        TextureMetadata info;
+        info.filename = filename;
+        info.desc = desc;
+        info.uploadBytesPerPixel = stbi_is_hdr(filename.c_str()) || stbi_is_16_bit(filename.c_str()) ? 16 : 4;
+#ifdef USE_OIIO
+        try {
+            auto source = createImageSource(filename);
+            if (source) {
+                TextureInfo texInfo;
+                source->open(&texInfo);
+                if (source->isOpen()) {
+                    validateRegistrationImage(texInfo);
+                    info.width = static_cast<int>(texInfo.width);
+                    info.height = static_cast<int>(texInfo.height);
+                    info.channels = static_cast<int>(texInfo.numChannels);
+                    info.uploadBytesPerPixel = texInfo.format == HIP_AD_FORMAT_UNSIGNED_INT8 ? 4 : 16;
+                    info.imageSource = std::move(source);
                 }
             }
+        } catch (const std::bad_alloc&) {
+            throw;
+        } catch (const std::exception& e) {
+            // Filename registration remains lazy even when metadata probing fails.
+            logMessage(LogLevel::Warn, "createTexture: metadata probe for '%s' failed: %s", filename.c_str(), e.what());
         }
-    } catch (...) {
-        // Fall back to stb_image on any exception
-        int w, h, c;
-        if (stbi_info(filename.c_str(), &w, &h, &c)) {
-            info.width = w;
-            info.height = h;
-            info.channels = c;
-        } else {
-            info.lastError = LoaderError::FileNotFound;
-        }
-    }
-#else
-    int w, h, c;
-    if (stbi_info(filename.c_str(), &w, &h, &c)) {
-        info.width = w;
-        info.height = h;
-        info.channels = c;
-    } else {
-        info.lastError = LoaderError::FileNotFound;
-        logMessage(LogLevel::Warn, "createTexture: file not found '%s'", filename.c_str());
-    }
 #endif
-
-    lastError_ = LoaderError::Success;
-    logMessage(LogLevel::Debug, "createTexture: queued '%s' as id=%u (%dx%d ch=%d)", filename.c_str(), id, info.width, info.height, info.channels);
-    return TextureHandle{id, true, info.width, info.height, info.channels, LoaderError::Success};
+        if (!info.imageSource) {
+            int w, h, c;
+            if (stbi_info(filename.c_str(), &w, &h, &c)) {
+                info.width = w;
+                info.height = h;
+                info.channels = c;
+            } else {
+                info.lastError = LoaderError::FileNotFound;
+                logMessage(LogLevel::Warn, "createTexture: deferred file read for '%s'", filename.c_str());
+            }
+        }
+        return commitRegistration(std::move(info));
+    } catch (const std::bad_alloc&) {
+        return registrationFailure(LoaderError::OutOfMemory);
+    }
 }
 
 TextureHandle DemandTextureLoader::Impl::createTexture(std::shared_ptr<ImageSource> imageSource, const TextureDesc& desc) {
     std::lock_guard<std::mutex> lock(mutex_);
-
-    if (!imageSource) {
-        lastError_ = LoaderError::InvalidParameter;
-        logMessage(LogLevel::Error, "createTexture: null ImageSource");
-        return TextureHandle{0, false, 0, 0, 0, lastError_};
-    }
+    if (initializationError_ != LoaderError::Success)
+        return registrationFailure(initializationError_);
+    if (!imageSource || !validDescriptor(desc))
+        return registrationFailure(LoaderError::InvalidParameter);
 
     // First check: same ImageSource pointer already registered
     ImageSource* rawPtr = imageSource.get();
@@ -356,96 +342,84 @@ TextureHandle DemandTextureLoader::Impl::createTexture(std::shared_ptr<ImageSour
         return TextureHandle{existingId, true, existing.width, existing.height, existing.channels, LoaderError::Success};
     }
 
-    // Second check: content-based hash deduplication (like OptiX coalesceDuplicateImages)
-    // This catches different ImageSource objects that point to the same underlying image
-    unsigned long long contentHash = imageSource->getHash(0);
+    unsigned long long contentHash;
+    TextureInfo texInfo;
+    try {
+        contentHash = imageSource->getHash(0);
+    } catch (const std::bad_alloc&) {
+        return registrationFailure(LoaderError::OutOfMemory);
+    } catch (const std::exception& e) {
+        logMessage(LogLevel::Error, "createTexture: ImageSource hash failed: %s", e.what());
+        return registrationFailure(LoaderError::ImageLoadFailed);
+    }
     if (contentHash != 0) {
-        auto hashIt = filenameHashToTextureId_.find(static_cast<size_t>(contentHash));
-        if (hashIt != filenameHashToTextureId_.end()) {
+        auto hashIt = contentHashToTextureId_.find(contentHash);
+        if (hashIt != contentHashToTextureId_.end()) {
             uint32_t existingId = hashIt->second;
             TextureMetadata& existing = textures_[existingId];
-            // Also register pointer mapping for faster future lookups
-            imageSourceToTextureId_[rawPtr] = existingId;
+            // Do not cache an unretained incoming pointer as an identity alias.
             logMessage(LogLevel::Debug, "createTexture: reusing existing texture id=%u via content hash", existingId);
             return TextureHandle{existingId, true, existing.width, existing.height, existing.channels, LoaderError::Success};
         }
     }
 
-    if (nextTextureId_ >= options_.maxTextures) {
-        lastError_ = LoaderError::MaxTexturesExceeded;
-        logMessage(LogLevel::Error, "createTexture: max textures exceeded (%zu)", static_cast<size_t>(options_.maxTextures));
-        return TextureHandle{0, false, 0, 0, 0, lastError_};
+    if (nextTextureId_ >= options_.maxTextures)
+        return registrationFailure(LoaderError::MaxTexturesExceeded);
+    try {
+        imageSource->open(&texInfo);
+        if (!imageSource->isOpen())
+            return registrationFailure(LoaderError::ImageLoadFailed);
+    } catch (const std::bad_alloc&) {
+        return registrationFailure(LoaderError::OutOfMemory);
+    } catch (const std::exception& e) {
+        logMessage(LogLevel::Error, "createTexture: ImageSource exception: %s", e.what());
+        return registrationFailure(LoaderError::ImageLoadFailed);
     }
-
-    uint32_t id = nextTextureId_++;
-
-    // Register in both deduplication maps
-    imageSourceToTextureId_[rawPtr] = id;
-    if (contentHash != 0) {
-        filenameHashToTextureId_[static_cast<size_t>(contentHash)] = id;
+    try {
+        validateRegistrationImage(texInfo);
+    } catch (const std::invalid_argument&) {
+        return registrationFailure(LoaderError::InvalidParameter);
+    } catch (const std::overflow_error&) {
+        return registrationFailure(LoaderError::InvalidParameter);
     }
-
-    TextureMetadata& info = textures_[id];
+    TextureMetadata info;
     info.imageSource = std::move(imageSource);
     info.desc = desc;
-    info.resident.store(false, std::memory_order_relaxed);
-    info.loading.store(false, std::memory_order_relaxed);
-
-    // Get image dimensions from ImageSource
-    try {
-        hip_demand::TextureInfo texInfo;
-        info.imageSource->open(&texInfo);
-        if (info.imageSource->isOpen()) {
-            info.width = texInfo.width;
-            info.height = texInfo.height;
-            info.channels = texInfo.numChannels;
-            info.uploadBytesPerPixel = texInfo.format == HIP_AD_FORMAT_UNSIGNED_INT8 ? 4 : 16;
-            // Don't close - keep open for later reading, or let ImageSource manage state
-        } else {
-            info.lastError = LoaderError::ImageLoadFailed;
-            logMessage(LogLevel::Warn, "createTexture: failed to open ImageSource");
-        }
-    } catch (const std::exception& e) {
-        info.lastError = LoaderError::ImageLoadFailed;
-        logMessage(LogLevel::Error, "createTexture: ImageSource exception: %s", e.what());
-    } catch (...) {
-        info.lastError = LoaderError::ImageLoadFailed;
-        logMessage(LogLevel::Error, "createTexture: unknown ImageSource exception");
-    }
-
-    lastError_ = LoaderError::Success;
-    logMessage(LogLevel::Debug, "createTexture: queued ImageSource as id=%u (%dx%d ch=%d)", id, info.width, info.height, info.channels);
-    return TextureHandle{id, true, info.width, info.height, info.channels, LoaderError::Success};
+    info.width = static_cast<int>(texInfo.width);
+    info.height = static_cast<int>(texInfo.height);
+    info.channels = static_cast<int>(texInfo.numChannels);
+    info.uploadBytesPerPixel = texInfo.format == HIP_AD_FORMAT_UNSIGNED_INT8 ? 4 : 16;
+    return commitRegistration(std::move(info), contentHash);
 }
 
 TextureHandle DemandTextureLoader::Impl::createTextureFromMemory(const void* data, int width, int height,
                                                                   int channels, const TextureDesc& desc) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (initializationError_ != LoaderError::Success)
+        return registrationFailure(initializationError_);
 
-    if (!data || width <= 0 || height <= 0 || channels <= 0 || channels > 4) {
-        lastError_ = LoaderError::InvalidParameter;
-        logMessage(LogLevel::Error, "createTextureFromMemory: invalid parameters (w=%d h=%d ch=%d)", width, height, channels);
-        return TextureHandle{0, false, 0, 0, 0, lastError_};
+    if (!data || width <= 0 || height <= 0 || channels <= 0 || channels > 4 || !validDescriptor(desc)) {
+        return registrationFailure(LoaderError::InvalidParameter);
     }
 
     size_t dataSize;
     try {
+        TextureInfo sourceInfo;
+        sourceInfo.width = width;
+        sourceInfo.height = height;
+        sourceInfo.numChannels = channels;
+        sourceInfo.isValid = true;
+        validateRegistrationImage(sourceInfo);
         dataSize = internal::imageByteSize(width, height, channels, 1);
-    } catch (const std::exception&) {
-        lastError_ = LoaderError::InvalidParameter;
-        return TextureHandle{0, false, 0, 0, 0, lastError_};
+    } catch (const std::invalid_argument&) {
+        return registrationFailure(LoaderError::InvalidParameter);
+    } catch (const std::overflow_error&) {
+        return registrationFailure(LoaderError::InvalidParameter);
     }
 
-    if (nextTextureId_ >= options_.maxTextures) {
-        lastError_ = LoaderError::MaxTexturesExceeded;
-        logMessage(LogLevel::Error, "createTextureFromMemory: max textures exceeded (%zu)", static_cast<size_t>(options_.maxTextures));
-        return TextureHandle{0, false, 0, 0, 0, lastError_};
-    }
-
-    uint32_t id = nextTextureId_++;
-
-    TextureMetadata& info = textures_[id];
-    info.filename = "";  // Memory-based texture
+    if (nextTextureId_ >= options_.maxTextures)
+        return registrationFailure(LoaderError::MaxTexturesExceeded);
+    TextureMetadata info;
     info.desc = desc;
     info.width = width;
     info.height = height;
@@ -453,13 +427,59 @@ TextureHandle DemandTextureLoader::Impl::createTextureFromMemory(const void* dat
     info.resident.store(false, std::memory_order_relaxed);
     info.loading.store(false, std::memory_order_relaxed);
 
-    // Cache the data
-    info.cachedData = std::make_unique<uint8_t[]>(dataSize);
-    std::memcpy(info.cachedData.get(), data, dataSize);
+    try {
+        hipCalls_.registrationCheckpoint(HipOperation::CacheData);
+        info.cachedData = std::make_unique<uint8_t[]>(dataSize);
+        std::memcpy(info.cachedData.get(), data, dataSize);
+    } catch (const std::bad_alloc&) {
+        return registrationFailure(LoaderError::OutOfMemory);
+    }
+    return commitRegistration(std::move(info));
+}
 
+TextureHandle DemandTextureLoader::Impl::registrationFailure(LoaderError error) {
+    lastError_ = error;
+    logMessage(LogLevel::Error, "Texture registration failed: %s", getErrorString(error));
+    return {InvalidTextureId, false, 0, 0, 0, error};
+}
+
+TextureHandle DemandTextureLoader::Impl::commitRegistration(TextureMetadata&& info,
+                                                            unsigned long long contentHash) {
+    const uint32_t id = nextTextureId_;
+    struct Rollback {
+        Impl& self;
+        const TextureMetadata& info;
+        unsigned long long hash;
+        bool filename = false, source = false, content = false, committed = false;
+        ~Rollback() {
+            if (committed) return;
+            if (filename) self.filenameToTextureId_.erase(info.filename);
+            if (source) self.imageSourceToTextureId_.erase(info.imageSource.get());
+            if (content) self.contentHashToTextureId_.erase(hash);
+        }
+    } rollback{*this, info, contentHash};
+    try {
+        if (!info.filename.empty()) {
+            hipCalls_.registrationCheckpoint(HipOperation::FilenameMap);
+            rollback.filename = filenameToTextureId_.emplace(info.filename, id).second;
+        }
+        if (info.imageSource) {
+            hipCalls_.registrationCheckpoint(HipOperation::SourceMap);
+            rollback.source = imageSourceToTextureId_.emplace(info.imageSource.get(), id).second;
+        }
+        if (contentHash) {
+            hipCalls_.registrationCheckpoint(HipOperation::ContentMap);
+            rollback.content = contentHashToTextureId_.emplace(contentHash, id).second;
+        }
+    } catch (const std::bad_alloc&) {
+        return registrationFailure(LoaderError::OutOfMemory);
+    }
+    rollback.committed = true;
+    textures_[id] = std::move(info);
+    ++nextTextureId_;
     lastError_ = LoaderError::Success;
-    logMessage(LogLevel::Debug, "createTextureFromMemory: created id=%u (%dx%d ch=%d)", id, width, height, channels);
-    return TextureHandle{id, true, width, height, channels, LoaderError::Success};
+    const auto& stored = textures_[id];
+    return {id, true, stored.width, stored.height, stored.channels, LoaderError::Success};
 }
 
 // -----------------------------------------------------------------------------
@@ -468,6 +488,11 @@ TextureHandle DemandTextureLoader::Impl::createTextureFromMemory(const void* dat
 
 void DemandTextureLoader::Impl::launchPrepare(hipStream_t stream) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (initializationError_ != LoaderError::Success) {
+        lastError_ = initializationError_;
+        logMessage(LogLevel::Error, "launchPrepare: loader initialization failed");
+        return;
+    }
 
     // Upload only dirty ranges for resident flags and texture objects.
     hipError_t err = hipSuccess;
@@ -540,7 +565,7 @@ void DemandTextureLoader::Impl::launchPrepare(hipStream_t stream) {
 }
 
 DeviceContext DemandTextureLoader::Impl::getDeviceContext() const {
-    return deviceContext_;
+    return initializationError_ == LoaderError::Success ? deviceContext_ : DeviceContext{};
 }
 
 // -----------------------------------------------------------------------------
@@ -548,6 +573,11 @@ DeviceContext DemandTextureLoader::Impl::getDeviceContext() const {
 // -----------------------------------------------------------------------------
 
 size_t DemandTextureLoader::Impl::processRequests(hipStream_t stream, const DeviceContext& deviceContext) {
+    if (initializationError_ != LoaderError::Success) {
+        lastError_ = initializationError_;
+        logMessage(LogLevel::Error, "processRequests: loader initialization failed");
+        return 0;
+    }
     // Early exit if aborted
     if (aborted_.load(std::memory_order_acquire)) {
         return 0;
@@ -603,6 +633,11 @@ size_t DemandTextureLoader::Impl::processRequests(hipStream_t stream, const Devi
 }
 
 Ticket DemandTextureLoader::Impl::processRequestsAsync(hipStream_t stream, const DeviceContext& deviceContext) {
+    if (initializationError_ != LoaderError::Success) {
+        lastError_ = initializationError_;
+        logMessage(LogLevel::Error, "processRequestsAsync: loader initialization failed");
+        return Ticket{};
+    }
     // Increment in-flight counter FIRST to prevent race with destructor.
     inFlightAsync_.fetch_add(1, std::memory_order_seq_cst);
 
@@ -753,6 +788,11 @@ size_t DemandTextureLoader::Impl::processRequestsHost(uint32_t requestCount, con
 
         for (size_t i = 0; i < requestCount; ++i) {
             uint32_t texId = requests[i];
+            if (texId >= nextTextureId_) {
+                lastError_ = LoaderError::InvalidTextureId;
+                logMessage(LogLevel::Error, "processRequests: invalid texture ID %u", texId);
+                continue;
+            }
             if (texId < nextTextureId_ && !textures_[texId].resident.load(std::memory_order_relaxed)) {
                 if (uniqueRequests.insert(texId).second) {
                     toLoad.push_back(texId);
@@ -826,6 +866,12 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
     if (aborted_.load(std::memory_order_acquire)) {
         return false;
     }
+    const hipError_t deviceError = hipSetDevice(device_);
+    if (deviceError != hipSuccess) {
+        lastError_ = hipLoaderError(deviceError);
+        logMessage(LogLevel::Error, "loadTexture: selecting device %d failed: %s", device_, hipGetErrorString(deviceError));
+        return false;
+    }
 
     // Double-checked locking pattern with atomic loading flag
     TextureMetadata& info = textures_[texId];
@@ -847,6 +893,15 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
         info.loading.store(false, std::memory_order_release);
         return false;
     }
+    if (info.array || info.mipmapArray || info.texObj) {
+        destroyTexture(texId);
+        if (info.array || info.mipmapArray || info.texObj) {
+            info.loading.store(false, std::memory_order_release);
+            return false;
+        }
+    }
+    info.primaryHipError = hipSuccess;
+    info.cleanupHipError = hipSuccess;
     TextureDesc desc = info.desc;
     std::string filename = info.filename;
     std::shared_ptr<ImageSource> imageSource = info.imageSource;
@@ -914,6 +969,7 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
             lock.lock();
             info.loading.store(false, std::memory_order_release);
             info.lastError = LoaderError::ImageLoadFailed;
+            lastError_ = info.lastError;
             logMessage(LogLevel::Error, "loadTexture: failed to read image for texId=%u", texId);
             return false;
         }
@@ -921,12 +977,14 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
         lock.lock();
         info.loading.store(false, std::memory_order_release);
         info.lastError = LoaderError::ImageLoadFailed;
+        lastError_ = info.lastError;
         logMessage(LogLevel::Error, "loadTexture: image decode failed: %s", e.what());
         return false;
     } catch (...) {
         lock.lock();
         info.loading.store(false, std::memory_order_release);
         info.lastError = LoaderError::ImageLoadFailed;
+        lastError_ = info.lastError;
         logMessage(LogLevel::Error, "loadTexture: unknown image decode failure");
         return false;
     }
@@ -938,7 +996,7 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
     const hipChannelFormatDesc channelDesc = image.channelDesc();
     const size_t rowBytes = image.rowBytes();
 
-    hipError_t err;
+    hipError_t err = hipSuccess;
     bool success = false;
     bool useMipmaps = desc.generateMipmaps && (width > 1 || height > 1);
 
@@ -983,25 +1041,31 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
 
         hipExtent extent = make_hipExtent(width, height, 0);
 
-        err = hipMallocMipmappedArray(&info.mipmapArray, &channelDesc, extent, numLevels);
+        err = hipCalls_.call(HipOperation::AllocateMipmapped, [&] {
+            return hipMallocMipmappedArray(&info.mipmapArray, &channelDesc, extent, numLevels);
+        });
         if (err != hipSuccess) {
             lock.lock();
             info.loading.store(false, std::memory_order_release);
-            info.lastError = LoaderError::OutOfMemory;
+            info.primaryHipError = err;
+            info.lastError = hipLoaderError(err);
+            lastError_ = info.lastError;
             return false;
         }
 
         hipArray_t level0Array;
         err = hipGetMipmappedArrayLevel(&level0Array, info.mipmapArray, 0);
         if (err == hipSuccess) {
-            err = hipMemcpy2DToArray(level0Array, 0, 0, image.data(), rowBytes,
-                                    rowBytes, height, hipMemcpyHostToDevice);
+            err = hipCalls_.call(HipOperation::Upload, [&] {
+                return hipMemcpy2DToArray(level0Array, 0, 0, image.data(), rowBytes,
+                                         rowBytes, height, hipMemcpyHostToDevice);
+            });
         }
 
         if (err == hipSuccess) {
             try {
                 success = generateMipLevels(info.mipmapArray, image, numLevels,
-                                               imageSource.get(), desc.sRGB);
+                                               imageSource.get(), desc.sRGB, err);
             } catch (const std::exception& e) {
                 logMessage(LogLevel::Error, "loadTexture: mip generation failed: %s", e.what());
                 success = false;
@@ -1024,7 +1088,9 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
             texDesc.minMipmapLevelClamp = 0;
             texDesc.mipmapFilterMode = hipFilterModeLinear;
 
-            err = hipCreateTextureObject(&info.texObj, &resDesc, &texDesc, nullptr);
+            err = hipCalls_.call(HipOperation::CreateSampler, [&] {
+                return hipCreateTextureObject(&info.texObj, &resDesc, &texDesc, nullptr);
+            });
             success = (err == hipSuccess);
 
             if (success) {
@@ -1034,11 +1100,15 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
             }
         }
     } else {
-        err = hipMallocArray(&info.array, &channelDesc, width, height);
+        err = hipCalls_.call(HipOperation::AllocateArray, [&] {
+            return hipMallocArray(&info.array, &channelDesc, width, height);
+        });
 
         if (err == hipSuccess) {
-            err = hipMemcpy2DToArray(info.array, 0, 0, image.data(), rowBytes,
-                                    rowBytes, height, hipMemcpyHostToDevice);
+            err = hipCalls_.call(HipOperation::Upload, [&] {
+                return hipMemcpy2DToArray(info.array, 0, 0, image.data(), rowBytes,
+                                         rowBytes, height, hipMemcpyHostToDevice);
+            });
         }
 
         if (err == hipSuccess) {
@@ -1054,7 +1124,9 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
             texDesc.normalizedCoords = desc.normalizedCoords ? 1 : 0;
             texDesc.sRGB = desc.sRGB && !image.isFloat() ? 1 : 0;
 
-            err = hipCreateTextureObject(&info.texObj, &resDesc, &texDesc, nullptr);
+            err = hipCalls_.call(HipOperation::CreateSampler, [&] {
+                return hipCreateTextureObject(&info.texObj, &resDesc, &texDesc, nullptr);
+            });
             success = (err == hipSuccess);
 
             if (success) {
@@ -1066,23 +1138,20 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
     }
 
     if (!success) {
-        if (info.mipmapArray) {
-            HIP_CHECK(hipFreeMipmappedArray(info.mipmapArray));
-            info.mipmapArray = nullptr;
-        }
-        if (info.array) {
-            HIP_CHECK(hipFreeArray(info.array));
-            info.array = nullptr;
-        }
+        info.primaryHipError = err;
+        cleanupTextureResources(info);
         lock.lock();
         info.loading.store(false, std::memory_order_release);
-        info.lastError = LoaderError::HipError;
-        logMessage(LogLevel::Error, "loadTexture: GPU upload failed for texId=%u", texId);
+        info.lastError = err == hipSuccess ? LoaderError::ImageLoadFailed : hipLoaderError(err);
+        lastError_ = info.lastError;
+        logMessage(LogLevel::Error, "loadTexture: texId=%u primary HIP error=%d cleanup HIP error=%d",
+                   texId, static_cast<int>(info.primaryHipError), static_cast<int>(info.cleanupHipError));
         return false;
     }
 
     // Publish results under lock
     lock.lock();
+    info.lastError = LoaderError::Success;
     info.width = width;
     info.height = height;
     info.uploadBytesPerPixel = static_cast<unsigned int>(image.bytesPerPixel());
@@ -1110,7 +1179,7 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
 bool DemandTextureLoader::Impl::generateMipLevels(hipMipmappedArray_t mipmapArray,
                                                    const internal::ImageData& baseImage,
                                                    int numLevels, ImageSource* source,
-                                                   bool sourceSRGB) {
+                                                   bool sourceSRGB, hipError_t& error) {
     internal::ImageData ownedCurrent;
     const internal::ImageData* current = &baseImage;
     for (int level = 1; level < numLevels; ++level) {
@@ -1128,12 +1197,14 @@ bool DemandTextureLoader::Impl::generateMipLevels(hipMipmappedArray_t mipmapArra
             next = internal::downsampleImage(*current, sourceSRGB);
         }
         hipArray_t levelArray;
-        hipError_t err = hipGetMipmappedArrayLevel(&levelArray, mipmapArray, level);
-        if (err != hipSuccess)
+        error = hipGetMipmappedArrayLevel(&levelArray, mipmapArray, level);
+        if (error != hipSuccess)
             return false;
-        err = hipMemcpy2DToArray(levelArray, 0, 0, next.data(), next.rowBytes(),
-                                  next.rowBytes(), next.height, hipMemcpyHostToDevice);
-        if (err != hipSuccess)
+        error = hipCalls_.call(HipOperation::Upload, [&] {
+            return hipMemcpy2DToArray(levelArray, 0, 0, next.data(), next.rowBytes(),
+                                     next.rowBytes(), next.height, hipMemcpyHostToDevice);
+        });
+        if (error != hipSuccess)
             return false;
         ownedCurrent = std::move(next);
         current = &ownedCurrent;
@@ -1145,35 +1216,46 @@ bool DemandTextureLoader::Impl::generateMipLevels(hipMipmappedArray_t mipmapArra
 // Texture Unloading & Eviction
 // -----------------------------------------------------------------------------
 
-void DemandTextureLoader::Impl::destroyTexture(uint32_t texId) {
-    TextureMetadata& info = textures_[texId];
-
-    if (!info.resident.load(std::memory_order_acquire)) return;
-
+bool DemandTextureLoader::Impl::cleanupTextureResources(TextureMetadata& info) {
     if (info.texObj) {
-        hipError_t err = hipDestroyTextureObject(info.texObj);
+        const hipError_t err = hipCalls_.call(HipOperation::DestroySampler, [&] {
+            return hipDestroyTextureObject(info.texObj);
+        });
         if (err != hipSuccess) {
-            lastError_ = LoaderError::HipError;
+            info.cleanupHipError = err;
+            return false;
         }
         info.texObj = 0;
     }
 
     if (info.mipmapArray) {
-        hipError_t err = hipFreeMipmappedArray(info.mipmapArray);
+        const hipError_t err = hipCalls_.call(HipOperation::FreeMipmapped, [&] {
+            return hipFreeMipmappedArray(info.mipmapArray);
+        });
         if (err != hipSuccess) {
-            lastError_ = LoaderError::HipError;
+            info.cleanupHipError = err;
+            return false;
         }
         info.mipmapArray = nullptr;
     }
 
     if (info.array) {
-        hipError_t err = hipFreeArray(info.array);
+        const hipError_t err = hipCalls_.call(HipOperation::FreeArray, [&] {
+            return hipFreeArray(info.array);
+        });
         if (err != hipSuccess) {
-            lastError_ = LoaderError::HipError;
+            info.cleanupHipError = err;
+            return false;
         }
         info.array = nullptr;
     }
+    return true;
+}
 
+void DemandTextureLoader::Impl::destroyTexture(uint32_t texId) {
+    TextureMetadata& info = textures_[texId];
+    if (!info.resident.load(std::memory_order_acquire) && !info.texObj && !info.array && !info.mipmapArray)
+        return;
     info.resident.store(false, std::memory_order_release);
     info.hasMipmaps = false;
     info.numMipLevels = 0;
@@ -1185,6 +1267,10 @@ void DemandTextureLoader::Impl::destroyTexture(uint32_t texId) {
 
     markTextureDirtyLocked(texId);
     markResidentWordDirtyLocked(wordIdx);
+    if (!cleanupTextureResources(info)) {
+        lastError_ = LoaderError::HipError;
+        return;
+    }
 
     logMessage(LogLevel::Debug, "destroyTexture: evicted texId=%u freed=%.2f MB",
                texId, static_cast<double>(info.memoryUsage) / (1024.0 * 1024.0));
@@ -1260,6 +1346,11 @@ void DemandTextureLoader::Impl::evictIfNeeded(size_t requiredMemory) {
 
 void DemandTextureLoader::Impl::unloadTexture(uint32_t texId) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (texId >= nextTextureId_) {
+        lastError_ = LoaderError::InvalidTextureId;
+        logMessage(LogLevel::Error, "unloadTexture: invalid texture ID %u", texId);
+        return;
+    }
     destroyTexture(texId);
 }
 
@@ -1297,7 +1388,7 @@ bool DemandTextureLoader::Impl::hadRequestOverflow() const {
 }
 
 LoaderError DemandTextureLoader::Impl::getLastError() const {
-    return lastError_;
+    return lastError_.load(std::memory_order_relaxed);
 }
 
 void DemandTextureLoader::Impl::enableEviction(bool enable) {
@@ -1319,6 +1410,9 @@ void DemandTextureLoader::Impl::updateEvictionPriority(uint32_t texId, EvictionP
     std::lock_guard<std::mutex> lock(mutex_);
     if (texId < nextTextureId_) {
         textures_[texId].desc.evictionPriority = priority;
+    } else {
+        lastError_ = LoaderError::InvalidTextureId;
+        logMessage(LogLevel::Error, "updateEvictionPriority: invalid texture ID %u", texId);
     }
 }
 

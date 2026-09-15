@@ -23,12 +23,12 @@ int main(int argc, char** argv) {
             std::cerr << "Error: Failed to get device properties: " << hipGetErrorString(result) << std::endl;
             return -1;
         }
-        std::cout << "Running tests on: " << prop.name << std::endl;
+        std::cout << "Default HIP device (fixtures may select HIP_DEMAND_TEST_DEVICE): " << prop.name << std::endl;
         std::cout << "  Compute capability: " << prop.major << "." << prop.minor << std::endl;
         std::cout << "  Total memory: " << prop.totalGlobalMem / (1024 * 1024) << " MB" << std::endl;
         std::cout << std::endl;
     } else {
-        std::cerr << "Warning: No HIP devices found. GPU tests will be skipped." << std::endl;
+        std::cerr << "No HIP devices found. GPU fixtures will report initialization failures." << std::endl;
     }
     
     return RUN_ALL_TESTS();

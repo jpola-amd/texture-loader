@@ -220,6 +220,12 @@ existing FetchContent fallback downloads GoogleTest.
 
 ## HIP Module API
 
+For a HIP-only cross-platform mip-filtering comparison, use the
+[standalone LOD reproducer](examples/lod_repro/README.md). Configure its
+directory directly; it does not build the loader or download its dependencies.
+It prints expected versus measured mip blends and distinguishes numerical
+differences from unsupported/setup failures.
+
 ### Why Module API?
 
 Visual Studio 2022 doesn't support HIP language in CMake. We use Module API to:
@@ -356,6 +362,34 @@ ctest --test-dir build --output-on-failure
 
 ### Test Coverage
 
+For registration and real sampling validation, use a separate test-enabled
+build with `USE_OIIO=ON` and explicit `HIP_ARCHITECTURES` for the target device.
+`image_data_tests` remains GPU-independent. Loader/sampling fixtures accept
+`HIP_DEMAND_TEST_DEVICE` (default zero); an unavailable device is a test failure,
+not a successful skip.
+
+The sampling code object is built and staged beside `texture_loader_tests`.
+It is also installed with the test executables through the `tests` install
+component. `HIP_DEMAND_TEST_KERNEL_DIR` can override code-object discovery;
+an invalid override fails rather than loading a stale build-tree module.
+Installed tests still require their GoogleTest/OIIO dependencies in the
+platform's supported library search path.
+
+```powershell
+ctest --test-dir build -C Release -N -R "^Registration|/Registration|SamplingTestUtils|LegacyTextureSamplingTest|SamplingHarnessDeviceTest"
+ctest --test-dir build -C Release -R "^Registration|/Registration|SamplingTestUtils|LegacyTextureSamplingTest|SamplingHarnessDeviceTest" --output-on-failure
+```
+
+The [item 01 evidence record](docs/implementation-plan/01-tests-and-registration-errors.md)
+documents the current Windows gfx1201 results. The two authored-mip tests run
+all checks, then report **skipped: expected incorrect behavior** only if their
+numerical differences match the known upstream mip-blend defect on that target.
+Different errors still fail; a corrected runtime passes normally. Expected
+pixels and tolerances are unchanged, and neither these skips nor descriptor
+readback count as filtering qualification. The standalone reproducer remains
+strict and still returns a numerical-difference exit code. Private fault seams
+are compiled only with `BUILD_TESTS=ON`; production calls are real by default.
+
 The test suite covers:
 
 | Test Suite | Description |
@@ -365,6 +399,9 @@ The test suite covers:
 | `ThreadPoolTests` | Thread pool construction, task execution, concurrency, shutdown |
 | `MemoryPoolTests` | `PinnedMemoryPool` and `HipEventPool` allocation and reuse |
 | `TicketTests` | Async ticket construction and wait behavior |
+| `RegistrationErrorTests` | Invalid identities, all-overload capacity boundaries, transaction rollback, failure injection, and device non-aliasing |
+| `SamplingTestUtilsTests` | GPU-independent authored mip/boundary fixtures and device/module selection |
+| `TextureSamplingTests` | Real HIP implicit/LOD/gradient sampling, native comparison, and fixture cleanup |
 
 ### Test Requirements
 

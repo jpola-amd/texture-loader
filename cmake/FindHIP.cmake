@@ -78,7 +78,7 @@ find_program(HIP_CLANG_EXECUTABLE
 
 find_path(HIP_DEVICE_LIB_PATH
     NAME bitcode
-    PATHS ${HIP_PATH}/lib/llvm/
+    PATHS ${HIP_PATH}/lib/llvm/ ${HIP_PATH}
     PATH_SUFFIXES llvm amdgcn llvm/amdgcn
     NO_DEFAULT_PATH
 )

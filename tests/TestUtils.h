@@ -6,11 +6,13 @@
 #include <gtest/gtest.h>
 #include <hip/hip_runtime.h>
 #include <DemandLoading/DemandTextureLoader.h>
+#include "SamplingTestSupport.h"
 
 #include <cstdint>
 #include <vector>
 #include <string>
 #include <filesystem>
+#include <iostream>
 
 namespace hip_demand {
 namespace test {
@@ -19,6 +21,7 @@ namespace test {
 class HipTestFixture : public ::testing::Test {
 protected:
     void SetUp() override {
+        ASSERT_NO_THROW(device_ = parseTestDevice(std::getenv("HIP_DEMAND_TEST_DEVICE")));
         hipError_t err = hipInit(0);
         ASSERT_EQ(err, hipSuccess) << "Failed to initialize HIP";
         
@@ -26,14 +29,27 @@ protected:
         err = hipGetDeviceCount(&deviceCount);
         ASSERT_EQ(err, hipSuccess) << "Failed to get device count";
         ASSERT_GT(deviceCount, 0) << "No HIP devices available";
+        ASSERT_LT(device_, deviceCount) << "HIP_DEMAND_TEST_DEVICE selects an unavailable device";
         
-        err = hipSetDevice(0);
+        err = hipSetDevice(device_);
         ASSERT_EQ(err, hipSuccess) << "Failed to set device";
+        initialized_ = true;
+        hipDeviceProp_t properties{};
+        ASSERT_EQ(hipGetDeviceProperties(&properties, device_), hipSuccess);
+        int runtime = 0, driver = 0;
+        ASSERT_EQ(hipRuntimeGetVersion(&runtime), hipSuccess);
+        ASSERT_EQ(hipDriverGetVersion(&driver), hipSuccess);
+        std::cout << "HIP test device=" << device_ << " " << properties.name << " "
+                  << properties.gcnArchName << " runtime=" << runtime << " driver=" << driver << '\n';
     }
     
     void TearDown() override {
-        ASSERT_EQ(hipDeviceReset(), hipSuccess) << "Failed to reset device";
+        if (initialized_)
+            EXPECT_EQ(hipDeviceReset(), hipSuccess) << "Failed to reset device";
     }
+
+    int device_ = 0;
+    bool initialized_ = false;
 };
 
 /// Test fixture with a DemandTextureLoader instance
@@ -41,6 +57,8 @@ class LoaderTestFixture : public HipTestFixture {
 protected:
     void SetUp() override {
         HipTestFixture::SetUp();
+        if (HasFatalFailure())
+            return;
         
         LoaderOptions options;
         options.maxTextures = 64;

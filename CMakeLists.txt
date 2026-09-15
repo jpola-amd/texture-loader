@@ -76,6 +76,7 @@ set(TEXTURE_LOADER_SOURCES
     src/DemandLoading/DemandTextureLoaderImpl.cpp
     src/DemandLoading/Ticket.cpp
     src/DemandLoading/Logging.cpp
+    src/DemandLoading/Internal/HipCalls.cpp
     src/DemandLoading/stb_image_impl.cpp
 )
 
@@ -132,6 +133,7 @@ if(BUILD_EXAMPLES)
 endif()
 
 if(BUILD_TESTS)
+    target_compile_definitions(hip_demand_texture PRIVATE HIP_DEMAND_TEST_HOOKS)
     enable_testing()
     add_subdirectory(tests)
 endif()

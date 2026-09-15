@@ -13,6 +13,7 @@
 #include "Internal/ThreadPool.h"
 #include "Internal/Utils.h"
 #include "Internal/ImageData.h"
+#include "Internal/HipCalls.h"
 
 #include <hip/hip_runtime.h>
 
@@ -58,6 +59,11 @@ public:
     bool isAborted() const;
 
 private:
+    LoaderError initialize();
+    TextureHandle registrationFailure(LoaderError error);
+    TextureHandle commitRegistration(internal::TextureMetadata&& info,
+                                     unsigned long long contentHash = 0);
+    bool cleanupTextureResources(internal::TextureMetadata& info);
     // RAII guard for async operations
     struct AsyncGuard {
         DemandTextureLoader::Impl* self;
@@ -82,11 +88,14 @@ private:
 
     // Mipmap generation
     bool generateMipLevels(hipMipmappedArray_t mipmapArray, const internal::ImageData& baseImage,
-                          int numLevels, ImageSource* source, bool sourceSRGB);
+                          int numLevels, ImageSource* source, bool sourceSRGB, hipError_t& error);
 
     // Configuration
     LoaderOptions options_;
+    internal::HipCalls hipCalls_;
+    LoaderError initializationError_ = LoaderError::HipError;
     int device_;
+    bool deviceKnown_ = false;
     mutable std::mutex mutex_;
 
     // Device context with all device pointers
@@ -118,7 +127,8 @@ private:
 
     // Texture deduplication maps (requires mutex_)
     std::unordered_map<ImageSource*, uint32_t> imageSourceToTextureId_;  // ImageSource* -> textureId
-    std::unordered_map<size_t, uint32_t> filenameHashToTextureId_;       // hash(filename) -> textureId
+    std::unordered_map<std::string, uint32_t> filenameToTextureId_;
+    std::unordered_map<unsigned long long, uint32_t> contentHashToTextureId_;
 
     // Statistics
     std::atomic<size_t> lastRequestCount_{0};
@@ -140,7 +150,7 @@ private:
     // HIP event pool for async operations
     std::unique_ptr<internal::HipEventPool> hipEventPool_;
 
-    LoaderError lastError_ = LoaderError::Success;
+    std::atomic<LoaderError> lastError_{LoaderError::Success};
 
     // Mipmap capability detection (requires mutex_)
     bool mipmapsSupportChecked_ = false;
