@@ -4,6 +4,7 @@
 #include "TextureSamplingTestData.h"
 #include <DemandLoading/DeviceContext.h>
 #include <filesystem>
+#include <functional>
 #include <vector>
 
 namespace hip_demand { namespace test {
@@ -22,8 +23,10 @@ public:
     hipError_t open(const std::filesystem::path& modulePath, const char* symbol = "sampleLegacyTextures");
     // The caller must finish publishing context/storage before sampling on the private stream.
     // Returns only after the kernel and result transfer have completed.
+    // afterLaunch exercises retirement while a consumer is queued on a nonblocking stream.
     hipError_t sample(DeviceContext context, const std::vector<SamplingInput>& inputs,
-                      std::vector<SamplingResult>& results);
+                      std::vector<SamplingResult>& results,
+                      const std::function<void()>& afterLaunch = {});
     hipError_t close();
     bool isClosed() const { return !module_ && !stream_ && !inputs_ && !outputs_; }
 

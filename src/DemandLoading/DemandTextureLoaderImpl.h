@@ -8,6 +8,7 @@
 #include <DemandLoading/Ticket.h>
 #include <ImageSource/ImageSource.h>
 #include "Internal/TextureMetadata.h"
+#include "Internal/TextureIdentity.h"
 #include "Internal/HipEventPool.h"
 #include "Internal/PinnedMemoryPool.h"
 #include "Internal/ThreadPool.h"
@@ -21,6 +22,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace hip_demand {
@@ -61,9 +63,15 @@ public:
 private:
     LoaderError initialize();
     TextureHandle registrationFailure(LoaderError error);
-    TextureHandle commitRegistration(internal::TextureMetadata&& info,
-                                     unsigned long long contentHash = 0);
+    TextureHandle commitRegistration(internal::TextureMetadata&& info);
+    TextureHandle registeredHandle(uint32_t id) const;
+    uint32_t findSampler(const internal::ImageStorage& storage, const TextureDesc& desc) const;
     bool cleanupTextureResources(internal::TextureMetadata& info);
+    bool cleanupStorageResources(internal::ImageStorage& storage);
+    bool selectDevice();
+    bool publishMappingsLocked(bool retiring = false);
+    bool quiesce(bool retiring = false);
+    void cancelTextureLocked(uint32_t texId);
     // RAII guard for async operations
     struct AsyncGuard {
         DemandTextureLoader::Impl* self;
@@ -78,13 +86,21 @@ private:
     void markResidentWordDirtyLocked(uint32_t wordIdx);
 
     // Core loading/unloading
-    bool loadTexture(uint32_t texId);
-    bool loadTextureThreadSafe(uint32_t texId);
+    struct LoadRequest {
+        uint32_t id;
+        uint64_t epoch;
+        std::shared_ptr<internal::ImageStorage> storage;
+    };
+    enum class LoadOutcome { NotLoaded, StorageFailed, Loaded };
+    LoadOutcome loadTexture(const LoadRequest& request);
+    bool loadStorage(internal::ImageStorage& storage, const TextureDesc& desc);
     void destroyTexture(uint32_t texId);
-    void evictIfNeeded(size_t requiredMemory);
+    void evictIfNeeded(size_t requiredMemory,
+                       const std::unordered_set<internal::ImageStorage*>& requestedStorage);
 
     // Request processing
-    size_t processRequestsHost(uint32_t requestCount, const uint32_t* requests);
+    std::vector<LoadRequest> readRequests(hipStream_t stream, const DeviceContext& deviceContext);
+    size_t processRequestsHost(const std::vector<LoadRequest>& requests);
 
     // Mipmap generation
     bool generateMipLevels(hipMipmappedArray_t mipmapArray, const internal::ImageData& baseImage,
@@ -97,6 +113,9 @@ private:
     int device_;
     bool deviceKnown_ = false;
     mutable std::mutex mutex_;
+    // Runtime operations are serialized independently of registration/metadata.
+    // Never acquire this mutex while holding mutex_: a decoder can need mutex_.
+    std::mutex operationMutex_;
 
     // Device context with all device pointers
     DeviceContext deviceContext_{};
@@ -125,10 +144,9 @@ private:
     uint32_t currentFrame_ = 0;
     size_t totalMemoryUsage_ = 0;
 
-    // Texture deduplication maps (requires mutex_)
-    std::unordered_map<ImageSource*, uint32_t> imageSourceToTextureId_;  // ImageSource* -> textureId
-    std::unordered_map<std::string, uint32_t> filenameToTextureId_;
-    std::unordered_map<unsigned long long, uint32_t> contentHashToTextureId_;
+    // Distinct identity namespaces and complete equality resolve hash collisions.
+    std::unordered_map<internal::StorageKey, std::shared_ptr<internal::ImageStorage>,
+                       internal::StorageKeyHash> storages_;
 
     // Statistics
     std::atomic<size_t> lastRequestCount_{0};
@@ -155,6 +173,7 @@ private:
     // Mipmap capability detection (requires mutex_)
     bool mipmapsSupportChecked_ = false;
     bool mipmapsSupported_ = true;
+    hipMipmappedArray_t mipmapProbe_ = nullptr;
 };
 
 } // namespace hip_demand

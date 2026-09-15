@@ -46,6 +46,15 @@ extern "C" __global__ void sampleLegacyTextures(
         value = make_float4(__uint_as_float(words[5]), 0, 0, 0);
         break;
     }
+    case SamplingPath::DelayedSnapshot: {
+        resident = hip_demand::isTextureResident(context, input.textureId);
+        const hipTextureObject_t object = (hipTextureObject_t)(resident ? context.textures[input.textureId] : 0);
+        const auto start = clock64();
+        while (clock64() - start < 100000000ULL) {}
+        if (resident)
+            value = ::tex2DLod<float4>(object, input.u, input.v, input.lod);
+        break;
+    }
     }
     outputs[index].value = value;
     outputs[index].resident = resident ? 1u : 0u;

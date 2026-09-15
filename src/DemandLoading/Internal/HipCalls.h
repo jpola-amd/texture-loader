@@ -18,7 +18,8 @@ enum class HipOperation {
     GetDevice, DeviceAllocation, HostAllocation, Initialize,
     AllocateArray, AllocateMipmapped, Upload, CreateSampler,
     FreeArray, FreeMipmapped, DestroySampler,
-    CacheData, FilenameMap, SourceMap, ContentMap
+    CacheData, FilenameMap, SourceMap, ContentMap,
+    InvalidateMappings, SynchronizeConsumers, PublishMappings
 };
 
 #ifdef HIP_DEMAND_TEST_HOOKS

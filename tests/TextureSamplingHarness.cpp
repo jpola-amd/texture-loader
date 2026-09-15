@@ -59,7 +59,8 @@ hipError_t TextureSamplingHarness::open(const std::filesystem::path& path, const
 }
 
 hipError_t TextureSamplingHarness::sample(DeviceContext context, const std::vector<SamplingInput>& inputs,
-                                          std::vector<SamplingResult>& results) {
+                                          std::vector<SamplingResult>& results,
+                                          const std::function<void()>& afterLaunch) {
     if (!kernel_ || inputs.empty() || inputs.size() > MaxSamples)
         return hipErrorInvalidValue;
     uint32_t count = static_cast<uint32_t>(inputs.size());
@@ -73,6 +74,8 @@ hipError_t TextureSamplingHarness::sample(DeviceContext context, const std::vect
         error = hipModuleLaunchKernel(kernel_, (count + 63) / 64, 1, 1, 64, 1, 1,
                                        0, stream_, arguments, nullptr);
     }
+    if (error == hipSuccess && afterLaunch)
+        afterLaunch();
     if (error == hipSuccess)
         error = hipMemcpyAsync(output.data(), outputs_, count * sizeof(SamplingResult),
                                hipMemcpyDeviceToHost, stream_);

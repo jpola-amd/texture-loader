@@ -48,7 +48,7 @@ struct LoaderOptions {
     size_t maxTextures = 4096;  // 1..UINT32_MAX; UINT32_MAX is never a texture ID
     size_t maxRequestsPerLaunch = 1024;  // 1..UINT32_MAX
     bool enableEviction = true;
-    unsigned int maxThreads = 0;  // 0 = auto
+    unsigned int maxThreads = 0;  // Legacy pool size (0 = auto); decode/upload currently serialized
     unsigned int minResidentFrames = 3;  // Thrashing prevention: don't evict textures younger than this
 };
 
@@ -97,37 +97,55 @@ public:
     DemandTextureLoader(const DemandTextureLoader&) = delete;
     DemandTextureLoader& operator=(const DemandTextureLoader&) = delete;
 
-    // Create a texture from file (not loaded until requested)
+    // Register a descriptor-specific sampler (pixels remain demand-loaded).
+    // Equal complete descriptors for the same filename/source identity reuse
+    // an ID, including at capacity. Every distinct descriptor consumes one ID.
+    // Compatible variants share image backing; sRGB and mip-generation/limit
+    // policies conservatively split storage. All descriptor fields participate
+    // in sampler identity, including eviction priority.
+    // These legacy handles are not owning leases: unload does not release
+    // registration capacity, and IDs are never recycled.
     TextureHandle createTexture(const std::string& filename, 
                                 const TextureDesc& desc = TextureDesc());
 
     // Create a texture from an ImageSource (pixels not loaded until requested).
     // Invalid metadata or an exception while opening/hashing fails registration.
-    // The ImageSource is retained for the lifetime of the texture.
+    // Content hashes use the ImageSource identity contract plus validated native
+    // dimensions/format/channels/mip metadata. Filename and content identities
+    // occupy separate namespaces. Storage retains its selected source through
+    // registration and active reads; an equivalent incoming alias need not be
+    // retained. Source content/metadata must remain stable while registered.
     TextureHandle createTexture(std::shared_ptr<ImageSource> imageSource,
                                 const TextureDesc& desc = TextureDesc());
     
-    // Create a texture from memory
+    // Copy byte pixels into a fresh registration/storage identity on every call.
     TextureHandle createTextureFromMemory(const void* data, 
                                          int width, int height, int channels,
                                          const TextureDesc& desc = TextureDesc());
 
-    // Prepare for launch (updates device context)
+    // Prepare for launch (updates device context). This implementation uses a
+    // serialized, device-quiescent publication/retirement baseline; table copies
+    // complete before return. Callers must not concurrently submit consumers
+    // while preparing or unloading, or overlap reuse of the request context.
     void launchPrepare(hipStream_t stream = 0);
 
     // Get device context to pass to kernel
     DeviceContext getDeviceContext() const;
 
     // Process texture requests after kernel launch using the provided device context
-    // Returns number of textures loaded
+    // Returns the number of sampler IDs newly made resident, not backing uploads.
     size_t processRequests(hipStream_t stream, const DeviceContext& deviceContext);
 
-    // Asynchronously process texture requests on a background thread using the provided device context and stream.
-    // Returns a Ticket that can be waited on.
+    // Completes request readback before handing decode/upload to a background
+    // worker. Runtime operations are serialized; a Ticket reports completion,
+    // not per-sampler success.
     Ticket processRequestsAsync(hipStream_t stream, const DeviceContext& deviceContext);
 
     // Statistics
     size_t getResidentTextureCount() const;
+    // Array texel payload, counted once per shared allocation, including failed
+    // cleanup until freed. Excludes opaque HIP/sampler overhead and host caches;
+    // this is neither a physical-VRAM measurement nor a hard budget guarantee.
     size_t getTotalTextureMemory() const;
     size_t getRequestCount() const;
     bool hadRequestOverflow() const;
@@ -140,9 +158,17 @@ public:
     
     /// Update the eviction priority for a texture dynamically.
     /// Use this to adjust priorities based on camera distance, LOD importance, etc.
+    /// Existing IDs never merge. Lookup of equal keys chooses the oldest ID.
+    /// Storage uses the highest sibling priority; any registered KeepResident
+    /// variant protects its backing even before that sampler is requested.
     void updateEvictionPriority(uint32_t textureId, EvictionPriority priority);
 
-    // Utility. Invalid/unregistered IDs set InvalidTextureId without mutation.
+    // Unload only this sampler; live or failed-to-destroy sibling objects keep
+    // their backing alive. Cancels older requests, waits for active operations
+    // and GPU consumers, and invalidates device mappings before resource free.
+    // Whole-storage eviction invalidates every sibling. Cleanup errors retain
+    // resources and charges for a later retry. Unload is not registration release.
+    // Invalid/unregistered IDs set InvalidTextureId without mutation.
     void unloadTexture(uint32_t textureId);
     void unloadAll();
 

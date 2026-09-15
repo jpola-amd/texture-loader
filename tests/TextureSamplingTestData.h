@@ -9,7 +9,8 @@
 namespace hip_demand { namespace test {
 
 enum class SamplingPath : uint32_t {
-    Implicit, Lod, Gradient, RecordRequest, NativeLod, NativeSamplerWords, NativeImageControlWord
+    Implicit, Lod, Gradient, RecordRequest, NativeLod, NativeSamplerWords, NativeImageControlWord,
+    DelayedSnapshot
 };
 
 struct SamplingInput {

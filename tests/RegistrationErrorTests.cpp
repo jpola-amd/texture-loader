@@ -605,7 +605,7 @@ TEST_P(RegistrationUploadFailure, FailureRollbackCleanupAndRetry) {
     request(loader, {texture.id}, 0);
     EXPECT_EQ(loader.getLastError(), LoaderError::HipError);
     EXPECT_EQ(loader.getResidentTextureCount(), 0u);
-    EXPECT_EQ(loader.getTotalTextureMemory(), 0u);
+    EXPECT_EQ(loader.getTotalTextureMemory(), failureOperation == allocation ? 0u : (mipmapped ? 20u : 16u));
     EXPECT_EQ(textureObject(loader, texture.id), hipTextureObject_t{});
     bool primary = false, secondary = false;
     for (const auto& record : faults.state->records()) {
