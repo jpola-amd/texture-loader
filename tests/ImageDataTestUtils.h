@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include "DemandLoading/Internal/ImageData.h"
 #include <array>
+#include <stdexcept>
 
 namespace hip_demand { namespace test {
 class TypedImageSource : public ImageSource {
@@ -128,6 +129,42 @@ inline TypedImageSource makeBoundaryPatternSource(bool floating) {
             source.pixels.insert(source.pixels.end(), color.begin(), color.end());
         }
     }
+    return source;
+}
+
+inline constexpr std::array<std::array<float, 4>, 5> filteringMipColors{{
+    {-2, .25f, 3, .625f}, {4, -1, .125f, .625f}, {.5f, 2, -3, .625f},
+    {8, .75f, 1.5f, .625f}, {-4, 3, 6, .625f}
+}};
+
+inline TypedImageSource makeFilteringMipSource(unsigned int width = 16, unsigned int height = 16,
+                                               bool spatialPattern = false) {
+    if (width == 0 || height == 0 || width > 31 || height > 31)
+        throw std::invalid_argument("Filtering fixture dimensions must be in [1,31]");
+    TypedImageSource source;
+    source.info.width = width;
+    source.info.height = height;
+    source.info.numChannels = 4;
+    source.info.numMipLevels = calculateNumMipLevels(width, height);
+    source.info.format = HIP_AD_FORMAT_FLOAT;
+    source.info.isValid = true;
+    for (unsigned int level = 0; level < source.info.numMipLevels; ++level) {
+        const unsigned int w = std::max(1u, width >> level), h = std::max(1u, height >> level);
+        auto& pixels = source.mipPixels.emplace_back();
+        pixels.reserve(size_t(w) * h * 16);
+        for (unsigned int y = 0; y < h; ++y) {
+            for (unsigned int x = 0; x < w; ++x) {
+                auto color = filteringMipColors[level];
+                if (spatialPattern) {
+                    color[0] += .125f * x + .0625f * y;
+                    color[1] += -.0625f * x + .125f * y;
+                }
+                const auto bytes = packed(color);
+                pixels.insert(pixels.end(), bytes.begin(), bytes.end());
+            }
+        }
+    }
+    source.pixels = source.mipPixels.front();
     return source;
 }
 

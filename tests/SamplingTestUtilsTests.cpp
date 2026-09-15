@@ -148,6 +148,57 @@ TEST(SamplingTestUtils, ReadFailureAndFreshFixtureAreIsolated) {
     EXPECT_EQ(failed.readLevels, (std::vector<unsigned int>{2}));
 }
 
+TEST(SamplingTestUtils, FilteringPyramidRetainsFiveAuthoredLevelsAndConstantAlpha) {
+    const std::array<std::array<float, 4>, 5> colors{{
+        {-2, .25f, 3, .625f}, {4, -1, .125f, .625f}, {.5f, 2, -3, .625f},
+        {8, .75f, 1.5f, .625f}, {-4, 3, 6, .625f}
+    }};
+    for (const auto& dimensions : {std::array<unsigned int, 2>{16, 16}, {19, 19}, {16, 8},
+                                   {19, 11}, {16, 1}, {1, 16}, {19, 1}, {1, 19}}) {
+        for (bool pattern : {false, true}) {
+            auto source = makeFilteringMipSource(dimensions[0], dimensions[1], pattern);
+            ASSERT_EQ(source.info.numMipLevels, 5u);
+            EXPECT_EQ(source.info.format, HIP_AD_FORMAT_FLOAT);
+            EXPECT_EQ(source.info.numChannels, 4u);
+            for (unsigned int level : {4u, 2u, 0u, 3u, 1u}) {
+                internal::ImageData image;
+                ASSERT_TRUE(internal::readImageSource(source, image, level));
+                EXPECT_EQ(image.width, std::max(1u, dimensions[0] >> level));
+                EXPECT_EQ(image.height, std::max(1u, dimensions[1] >> level));
+                for (unsigned int y = 0; y < image.height; ++y) {
+                    for (unsigned int x = 0; x < image.width; ++x) {
+                        const size_t index = (size_t(y) * image.width + x) * 4;
+                        EXPECT_FLOAT_EQ(image.floats[index], colors[level][0] +
+                            (pattern ? (2.f * x + y) / 16 : 0));
+                        EXPECT_FLOAT_EQ(image.floats[index + 1], colors[level][1] +
+                            (pattern ? (-float(x) + 2.f * y) / 16 : 0));
+                        EXPECT_FLOAT_EQ(image.floats[index + 2], colors[level][2]);
+                        EXPECT_FLOAT_EQ(image.floats[index + 3], .625f);
+                    }
+                }
+            }
+            EXPECT_EQ(source.readLevels, (std::vector<unsigned int>{4, 2, 0, 3, 1}));
+            EXPECT_EQ(source.baseColorReads, 0u);
+        }
+    }
+}
+
+TEST(SamplingTestUtils, FilteringPyramidBoundsAndReadFailure) {
+    for (const auto& dimensions : {std::array<unsigned int, 2>{0, 16}, {16, 0}, {32, 1}, {1, 32}})
+        EXPECT_THROW(makeFilteringMipSource(dimensions[0], dimensions[1]), std::invalid_argument);
+    auto singleton = makeFilteringMipSource(1, 1);
+    EXPECT_EQ(singleton.info.numMipLevels, 1u);
+    auto source = makeFilteringMipSource();
+    internal::ImageData image;
+    EXPECT_FALSE(internal::readImageSource(source, image, 5));
+    EXPECT_TRUE(source.readLevels.empty());
+    source.failRead = true;
+    EXPECT_FALSE(internal::readImageSource(source, image, 3));
+    source.failRead = false;
+    EXPECT_TRUE(internal::readImageSource(source, image, 3));
+    EXPECT_EQ(source.readLevels, (std::vector<unsigned int>{3, 3}));
+}
+
 TEST(SamplingTestUtils, DeviceSelectionRejectsMalformedOrOverflowingOrdinals) {
     EXPECT_EQ(parseTestDevice(nullptr), 0);
     EXPECT_EQ(parseTestDevice("0"), 0);

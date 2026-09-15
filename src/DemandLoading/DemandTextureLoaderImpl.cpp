@@ -1086,7 +1086,7 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
             texDesc.sRGB = desc.sRGB && !image.isFloat() ? 1 : 0;
             texDesc.maxMipmapLevelClamp = numLevels - 1;
             texDesc.minMipmapLevelClamp = 0;
-            texDesc.mipmapFilterMode = hipFilterModeLinear;
+            texDesc.mipmapFilterMode = desc.mipmapFilterMode;
 
             err = hipCalls_.call(HipOperation::CreateSampler, [&] {
                 return hipCreateTextureObject(&info.texObj, &resDesc, &texDesc, nullptr);
