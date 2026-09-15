@@ -40,15 +40,19 @@ public:
     // Public API implementations
     TextureHandle createTexture(const std::string& filename, const TextureDesc& desc,
         const capability_v1::Policy& policy = {{capability_v1::Version, sizeof(capability_v1::Policy)},
-                                              capability_v1::MipPolicy::LegacyCompatibility});
+                                              capability_v1::MipPolicy::LegacyCompatibility},
+        const anisotropy_v1::Request& request = anisotropy_v1::Request::legacy());
     TextureHandle createTexture(std::shared_ptr<ImageSource> imageSource, const TextureDesc& desc,
         const capability_v1::Policy& policy = {{capability_v1::Version, sizeof(capability_v1::Policy)},
-                                              capability_v1::MipPolicy::LegacyCompatibility});
+                                              capability_v1::MipPolicy::LegacyCompatibility},
+        const anisotropy_v1::Request& request = anisotropy_v1::Request::legacy());
     TextureHandle createTextureFromMemory(const void* data, int width, int height,
         int channels, const TextureDesc& desc,
         const capability_v1::Policy& policy = {{capability_v1::Version, sizeof(capability_v1::Policy)},
-                                              capability_v1::MipPolicy::LegacyCompatibility});
+                                              capability_v1::MipPolicy::LegacyCompatibility},
+        const anisotropy_v1::Request& request = anisotropy_v1::Request::legacy());
     contract_v1::Outcome getTextureStatusV1(uint32_t id, capability_v1::Status& status) const;
+    contract_v1::Outcome getTextureAnisotropyStatusV1(uint32_t id, anisotropy_v1::Status& status) const;
     void launchPrepare(hipStream_t stream);
     DeviceContext getDeviceContext() const;
     size_t processRequests(hipStream_t stream, const DeviceContext& deviceContext);
@@ -73,7 +77,7 @@ private:
     TextureHandle commitRegistration(internal::TextureMetadata&& info);
     TextureHandle registeredHandle(uint32_t id) const;
     uint32_t findSampler(const internal::ImageStorage& storage, const TextureDesc& desc,
-                         capability_v1::MipPolicy policy) const;
+                         capability_v1::MipPolicy policy, const anisotropy_v1::Request& request) const;
     void refreshStorageStatusLocked(internal::ImageStorage& storage);
     bool cleanupTextureResources(internal::TextureMetadata& info);
     bool cleanupStorageResources(internal::ImageStorage& storage);
@@ -103,7 +107,7 @@ private:
     enum class LoadOutcome { NotLoaded, StorageFailed, Loaded };
     LoadOutcome loadTexture(const LoadRequest& request);
     bool loadStorage(internal::ImageStorage& storage, const TextureDesc& desc, capability_v1::MipPolicy policy,
-                     capability_v1::Support& support);
+                     capability_v1::Support& support, uint32_t maxAnisotropy);
     void destroyTexture(uint32_t texId);
     void evictIfNeeded(size_t requiredMemory,
                        const std::unordered_set<internal::ImageStorage*>& requestedStorage);
@@ -189,6 +193,7 @@ private:
     struct Probe {
         TextureDesc desc{};
         bool floatPixels = false;
+        uint32_t maxAnisotropy = 0;
         capability_v1::Support support = capability_v1::Support::Unknown;
         capability_v1::Failure primary{}, cleanup{};
         hipMipmappedArray_t array = nullptr;
@@ -196,7 +201,7 @@ private:
         size_t bytes = 0;
     };
     std::vector<Probe> probes_;
-    Probe& probeMipmaps(const TextureDesc& desc, bool floatPixels);
+    Probe& probeMipmaps(const TextureDesc& desc, bool floatPixels, uint32_t maxAnisotropy);
     bool cleanupProbe(Probe& probe);
 };
 

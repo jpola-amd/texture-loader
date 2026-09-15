@@ -69,6 +69,25 @@ contract_v1::Outcome DemandTextureLoader::getTextureStatusV1(uint32_t id, capabi
     return impl_->getTextureStatusV1(id, status);
 }
 
+TextureHandle DemandTextureLoader::createTextureAnisotropyV1(const std::string& filename, const TextureDesc& desc,
+    const anisotropy_v1::Request& request, const capability_v1::Policy& policy) {
+    return impl_->createTexture(filename, desc, policy, request);
+}
+
+TextureHandle DemandTextureLoader::createTextureAnisotropyV1(std::shared_ptr<ImageSource> source, const TextureDesc& desc,
+    const anisotropy_v1::Request& request, const capability_v1::Policy& policy) {
+    return impl_->createTexture(std::move(source), desc, policy, request);
+}
+
+TextureHandle DemandTextureLoader::createTextureFromMemoryAnisotropyV1(const void* data, int width, int height, int channels,
+    const TextureDesc& desc, const anisotropy_v1::Request& request, const capability_v1::Policy& policy) {
+    return impl_->createTextureFromMemory(data, width, height, channels, desc, policy, request);
+}
+
+contract_v1::Outcome DemandTextureLoader::getTextureAnisotropyStatusV1(uint32_t id, anisotropy_v1::Status& status) const {
+    return impl_->getTextureAnisotropyStatusV1(id, status);
+}
+
 void DemandTextureLoader::launchPrepare(hipStream_t stream) {
     impl_->launchPrepare(stream);
 }

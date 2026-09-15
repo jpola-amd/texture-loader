@@ -34,12 +34,30 @@ using internal::RequestStats;
 using internal::calculateMipLevels;
 using internal::HipOperation;
 namespace cap = capability_v1;
+namespace aniso = anisotropy_v1;
 using contract_v1::Outcome;
 
 namespace {
 bool validPolicy(const cap::Policy& policy) {
     return policy.abi.version == cap::Version && policy.abi.byteSize == sizeof(policy) &&
            policy.mipPolicy <= cap::MipPolicy::AllowBaseLevelFallback;
+}
+
+bool validAnisotropy(const aniso::Request& request) {
+    if (request.abi.version != aniso::Version || request.abi.byteSize != sizeof(request))
+        return false;
+    if (request.profile == aniso::Profile::LegacyCompatibility)
+        return request.maxAnisotropy == 0 && request.requirement == aniso::Requirement::AllowUnqualified;
+    return (request.profile == aniso::Profile::Explicit || request.profile == aniso::Profile::Parity16) &&
+           request.maxAnisotropy >= 1 && request.maxAnisotropy <= 16 &&
+           (request.profile != aniso::Profile::Parity16 || request.maxAnisotropy == 16) &&
+           request.requirement <= aniso::Requirement::RequireQualified;
+}
+
+bool anisotropyDegraded(const TextureMetadata& info) {
+    return info.anisotropy.profile != aniso::Profile::LegacyCompatibility &&
+        (info.anisotropy.maxAnisotropy > 1 ||
+         (info.status.returned && info.status.returnedSampler.maxAnisotropy != info.anisotropy.maxAnisotropy));
 }
 
 bool mipEnabled(const TextureDesc& desc, cap::MipPolicy policy) {
@@ -63,7 +81,8 @@ cap::Failure hipFailure(cap::Operation operation, hipError_t error) {
     return {outcome, operation, static_cast<int32_t>(error)};
 }
 
-hipTextureDesc makeSampler(const TextureDesc& desc, bool floatPixels, bool mipmapped, int levels) {
+hipTextureDesc makeSampler(const TextureDesc& desc, bool floatPixels, bool mipmapped, int levels,
+                           uint32_t maxAnisotropy) {
     hipTextureDesc sampler{};
     sampler.addressMode[0] = desc.addressMode[0];
     sampler.addressMode[1] = desc.addressMode[1];
@@ -71,6 +90,7 @@ hipTextureDesc makeSampler(const TextureDesc& desc, bool floatPixels, bool mipma
     sampler.readMode = floatPixels ? hipReadModeElementType : hipReadModeNormalizedFloat;
     sampler.normalizedCoords = desc.normalizedCoords ? 1 : 0;
     sampler.sRGB = desc.sRGB && !floatPixels ? 1 : 0;
+    sampler.maxAnisotropy = maxAnisotropy;
     if (mipmapped) {
         sampler.mipmapFilterMode = desc.mipmapFilterMode;
         sampler.maxMipmapLevelClamp = static_cast<float>(levels - 1);
@@ -352,22 +372,24 @@ void DemandTextureLoader::Impl::markResidentWordDirtyLocked(uint32_t wordIdx) {
 // -----------------------------------------------------------------------------
 
 TextureHandle DemandTextureLoader::Impl::createTexture(const std::string& filename, const TextureDesc& desc,
-                                                       const cap::Policy& policy) {
+                                                       const cap::Policy& policy, const aniso::Request& request) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (initializationError_ != LoaderError::Success)
         return registrationFailure(initializationError_);
-    if (filename.empty() || filename.find('\0') != std::string::npos || !validDescriptor(desc) || !validPolicy(policy))
+    if (filename.empty() || filename.find('\0') != std::string::npos || !validDescriptor(desc) ||
+        !validPolicy(policy) || !validAnisotropy(request))
         return registrationFailure(LoaderError::InvalidParameter);
 
     try {
         TextureMetadata info;
         info.desc = desc;
         info.policy = policy.mipPolicy;
+        info.anisotropy = request;
         ImageStorage identity;
         identity.filename = filename;
         auto it = storages_.find(storageKey(identity, desc, StorageIdentity::Filename, info.policy));
         if (it != storages_.end()) {
-            const uint32_t id = findSampler(*it->second, desc, info.policy);
+            const uint32_t id = findSampler(*it->second, desc, info.policy, request);
             if (id != InvalidTextureId)
                 return registeredHandle(id);
             if (nextTextureId_ >= options_.maxTextures)
@@ -422,14 +444,14 @@ TextureHandle DemandTextureLoader::Impl::createTexture(const std::string& filena
 }
 
 TextureHandle DemandTextureLoader::Impl::createTexture(std::shared_ptr<ImageSource> imageSource, const TextureDesc& desc,
-                                                       const cap::Policy& policy) {
+                                                       const cap::Policy& policy, const aniso::Request& request) {
     // A retained source can feed multiple incompatible storages. Serialize its
     // registration-time open/hash calls with all source reads as well.
     std::lock_guard<std::mutex> operation(operationMutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     if (initializationError_ != LoaderError::Success)
         return registrationFailure(initializationError_);
-    if (!imageSource || !validDescriptor(desc) || !validPolicy(policy))
+    if (!imageSource || !validDescriptor(desc) || !validPolicy(policy) || !validAnisotropy(request))
         return registrationFailure(LoaderError::InvalidParameter);
     if (!selectDevice())
         return registrationFailure(lastError_.load(std::memory_order_relaxed));
@@ -468,8 +490,9 @@ TextureHandle DemandTextureLoader::Impl::createTexture(std::shared_ptr<ImageSour
         TextureMetadata info;
         info.desc = desc;
         info.policy = policy.mipPolicy;
+        info.anisotropy = request;
         if (it != storages_.end()) {
-            const uint32_t id = findSampler(*it->second, desc, info.policy);
+            const uint32_t id = findSampler(*it->second, desc, info.policy, request);
             if (id != InvalidTextureId)
                 return registeredHandle(id);
             info.storage = it->second;
@@ -496,13 +519,13 @@ TextureHandle DemandTextureLoader::Impl::createTexture(std::shared_ptr<ImageSour
 
 TextureHandle DemandTextureLoader::Impl::createTextureFromMemory(const void* data, int width, int height,
                                                                   int channels, const TextureDesc& desc,
-                                                                  const cap::Policy& policy) {
+                                                                  const cap::Policy& policy, const aniso::Request& request) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (initializationError_ != LoaderError::Success)
         return registrationFailure(initializationError_);
 
     if (!data || width <= 0 || height <= 0 || channels <= 0 || channels > 4 ||
-        !validDescriptor(desc) || !validPolicy(policy)) {
+        !validDescriptor(desc) || !validPolicy(policy) || !validAnisotropy(request)) {
         return registrationFailure(LoaderError::InvalidParameter);
     }
 
@@ -527,6 +550,7 @@ TextureHandle DemandTextureLoader::Impl::createTextureFromMemory(const void* dat
         TextureMetadata info;
         info.desc = desc;
         info.policy = policy.mipPolicy;
+        info.anisotropy = request;
         info.storage = std::make_shared<ImageStorage>();
         auto& storage = *info.storage;
         storage.width = width;
@@ -553,12 +577,13 @@ TextureHandle DemandTextureLoader::Impl::registeredHandle(uint32_t id) const {
 }
 
 uint32_t DemandTextureLoader::Impl::findSampler(const ImageStorage& storage, const TextureDesc& desc,
-                                                cap::MipPolicy policy) const {
-    const size_t hash = internal::TextureDescHash{}(desc);
+                                                cap::MipPolicy policy, const aniso::Request& request) const {
+    const size_t hash = internal::samplerHash(desc, policy, request);
     // Creation order makes lookup deterministic even when priority mutation
     // leaves multiple live registrations with the same complete descriptor.
     for (uint32_t id : storage.samplers)
-        if (textures_[id].descriptorHash == hash && textures_[id].desc == desc && textures_[id].policy == policy)
+        if (textures_[id].descriptorHash == hash && textures_[id].desc == desc && textures_[id].policy == policy &&
+            textures_[id].anisotropy == request)
             return id;
     return InvalidTextureId;
 }
@@ -603,7 +628,7 @@ TextureHandle DemandTextureLoader::Impl::commitRegistration(TextureMetadata&& in
         return registrationFailure(LoaderError::OutOfMemory);
     }
     rollback.committed = true;
-    info.descriptorHash = internal::TextureDescHash{}(info.desc);
+    info.descriptorHash = internal::samplerHash(info.desc, info.policy, info.anisotropy);
     info.status = identityStatus_;
     info.status.textureId = id;
     info.status.policy = info.policy;
@@ -628,6 +653,42 @@ Outcome DemandTextureLoader::Impl::getTextureStatusV1(uint32_t id, cap::Status& 
         return Outcome::InvalidKey;
     }
     status = textures_[id].status;
+    return Outcome::Success;
+}
+
+Outcome DemandTextureLoader::Impl::getTextureAnisotropyStatusV1(uint32_t id, aniso::Status& status) const {
+    if (status.abi.version != aniso::Version || status.abi.byteSize != sizeof(status)) {
+        logMessage(LogLevel::Error, "getTextureAnisotropyStatusV1: incompatible status ABI");
+        return Outcome::AbiMismatch;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (id >= nextTextureId_) {
+        logMessage(LogLevel::Error, "getTextureAnisotropyStatusV1: invalid texture ID %u", id);
+        return Outcome::InvalidKey;
+    }
+    const auto& info = textures_[id];
+    aniso::Status result;
+    result.requested = info.anisotropy;
+    result.texture = info.status;
+    const auto operation = info.status.primary.operation;
+    if ((operation == cap::Operation::CreateSampler || operation == cap::Operation::ProbeCreateSampler) &&
+        info.status.primary.outcome == Outcome::Unsupported)
+        result.samplerSupport = cap::Support::Unsupported;
+    else if (info.status.submitted && info.status.returned)
+        result.samplerSupport = cap::Support::OperationSupported;
+    // No runtime operation/readback promotes a configuration to pixel-qualified.
+    result.limitations = info.anisotropy.profile == aniso::Profile::LegacyCompatibility ?
+                         aniso::LegacySetting : aniso::UnqualifiedBehavior;
+    if (info.status.resource == cap::Resource::Array)
+        result.limitations |= aniso::SingleLevel;
+    if (info.status.returned &&
+        info.status.returnedSampler.maxAnisotropy != info.anisotropy.maxAnisotropy)
+        result.limitations |= aniso::DescriptorMismatch;
+    if (info.status.reason == cap::Reason::CapabilityFallback)
+        result.limitations |= aniso::BaseLevelFallback;
+    result.requirementRejected = info.status.primary.operation == cap::Operation::QualifySampler &&
+                                 info.status.primary.outcome == Outcome::Unsupported;
+    status = result;
     return Outcome::Success;
 }
 
@@ -868,6 +929,8 @@ size_t DemandTextureLoader::Impl::processRequestsHost(const std::vector<LoadRequ
                 if (uniqueRequests.insert(texId).second) {
                     toLoad.push_back(request);
                     const TextureMetadata& info = textures_[texId];
+                    if (info.anisotropy.requirement == aniso::Requirement::RequireQualified)
+                        continue;
                     const auto& storage = *request.storage;
                     if (storage.array || storage.mipmapArray || !uniqueStorage.insert(request.storage.get()).second)
                         continue;
@@ -977,20 +1040,22 @@ bool DemandTextureLoader::Impl::cleanupProbe(Probe& probe) {
     return true;
 }
 
-DemandTextureLoader::Impl::Probe& DemandTextureLoader::Impl::probeMipmaps(const TextureDesc& desc, bool floatPixels) {
+DemandTextureLoader::Impl::Probe& DemandTextureLoader::Impl::probeMipmaps(const TextureDesc& desc, bool floatPixels,
+                                                                        uint32_t maxAnisotropy) {
     std::lock_guard<std::mutex> lock(mutex_);
     TextureDesc key = desc;
     key.generateMipmaps = true;
     key.maxMipLevel = 0;
     key.evictionPriority = EvictionPriority::Normal;
     auto found = std::find_if(probes_.begin(), probes_.end(), [&](const Probe& probe) {
-        return probe.floatPixels == floatPixels && probe.desc == key;
+        return probe.floatPixels == floatPixels && probe.desc == key && probe.maxAnisotropy == maxAnisotropy;
     });
     if (found == probes_.end()) {
         probes_.emplace_back();
         found = std::prev(probes_.end());
         found->desc = key;
         found->floatPixels = floatPixels;
+        found->maxAnisotropy = maxAnisotropy;
     }
     auto& probe = *found;
     if (!cleanupProbe(probe))
@@ -1040,7 +1105,7 @@ DemandTextureLoader::Impl::Probe& DemandTextureLoader::Impl::probeMipmaps(const 
             hipResourceDesc resource{};
             resource.resType = hipResourceTypeMipmappedArray;
             resource.res.mipmap.mipmap = probe.array;
-            const auto sampler = makeSampler(desc, floatPixels, true, 3);
+            const auto sampler = makeSampler(desc, floatPixels, true, 3, maxAnisotropy);
             success = run(HipOperation::ProbeCreateSampler, cap::Operation::ProbeCreateSampler, [&] {
                 return hipCreateTextureObject(&probe.sampler, &resource, &sampler, nullptr);
             });
@@ -1066,6 +1131,7 @@ DemandTextureLoader::Impl::LoadOutcome DemandTextureLoader::Impl::loadTexture(co
     }
     TextureDesc desc;
     cap::MipPolicy policy;
+    aniso::Request anisotropy;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto& info = textures_[request.id];
@@ -1087,10 +1153,19 @@ DemandTextureLoader::Impl::LoadOutcome DemandTextureLoader::Impl::loadTexture(co
         ++info.status.attempts;
         desc = info.desc;
         policy = info.policy;
+        anisotropy = info.anisotropy;
+        if (anisotropy.requirement == aniso::Requirement::RequireQualified) {
+            info.lastError = LoaderError::Unsupported;
+            info.status.primary = {Outcome::Unsupported, cap::Operation::QualifySampler, 0};
+            info.status.state = cap::State::Failed;
+            lastError_ = info.lastError;
+            logMessage(LogLevel::Error, "Anisotropy requires pixel qualification; configuration is unqualified");
+            return LoadOutcome::NotLoaded;
+        }
     }
     auto& storage = *request.storage;
     cap::Support support = cap::Support::Unknown;
-    if (!storage.uploaded && !loadStorage(storage, desc, policy, support)) {
+    if (!storage.uploaded && !loadStorage(storage, desc, policy, support, anisotropy.maxAnisotropy)) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto& info = textures_[request.id];
         info.lastError = storage.lastError;
@@ -1100,6 +1175,10 @@ DemandTextureLoader::Impl::LoadOutcome DemandTextureLoader::Impl::loadTexture(co
         info.status.cleanup = storage.cleanup;
         info.status.capability = support;
         info.status.state = cap::State::Failed;
+        if (anisotropy.profile != aniso::Profile::LegacyCompatibility && storage.primary.outcome == Outcome::Unsupported) {
+            info.lastError = LoaderError::Unsupported;
+            lastError_ = info.lastError;
+        }
         refreshStorageStatusLocked(storage);
         return LoadOutcome::StorageFailed;
     }
@@ -1123,7 +1202,8 @@ DemandTextureLoader::Impl::LoadOutcome DemandTextureLoader::Impl::loadTexture(co
         resource.resType = hipResourceTypeArray;
         resource.res.array.array = storage.array;
     }
-    const auto sampler = makeSampler(desc, storage.floatPixels, storage.hasMipmaps, storage.numMipLevels);
+    const auto sampler = makeSampler(desc, storage.floatPixels, storage.hasMipmaps, storage.numMipLevels,
+                                     anisotropy.maxAnisotropy);
     hipTextureObject_t object = 0;
     hipError_t error = hipCalls_.call(HipOperation::CreateSampler, [&] {
         return hipCreateTextureObject(&object, &resource, &sampler, nullptr);
@@ -1135,6 +1215,8 @@ DemandTextureLoader::Impl::LoadOutcome DemandTextureLoader::Impl::loadTexture(co
         error = hipCalls_.call(HipOperation::ReadSampler, [&] {
             return hipGetTextureObjectTextureDesc(&returned, object);
         });
+        if (error == hipSuccess)
+            hipCalls_.observeSampler(returned);
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1148,7 +1230,8 @@ DemandTextureLoader::Impl::LoadOutcome DemandTextureLoader::Impl::loadTexture(co
     refreshStorageStatusLocked(storage);
     if (error != hipSuccess) {
         info.primaryHipError = error;
-        info.lastError = hipLoaderError(error);
+        info.lastError = error == hipErrorNotSupported && anisotropy.profile != aniso::Profile::LegacyCompatibility ?
+                         LoaderError::Unsupported : hipLoaderError(error);
         info.status.primary = hipFailure(operation, error);
         info.status.state = cap::State::Failed;
         cleanupTextureResources(info);
@@ -1164,8 +1247,9 @@ DemandTextureLoader::Impl::LoadOutcome DemandTextureLoader::Impl::loadTexture(co
     }
     info.lastError = LoaderError::Success;
     info.status.cleanup = storage.cleanup;
-    info.status.state = storage.reason == cap::Reason::CapabilityFallback ? cap::State::Degraded : cap::State::Resident;
-    if (info.status.state == cap::State::Degraded)
+    info.status.state = storage.reason == cap::Reason::CapabilityFallback || anisotropyDegraded(info) ?
+                        cap::State::Degraded : cap::State::Resident;
+    if (storage.reason == cap::Reason::CapabilityFallback)
         info.status.capability = support == cap::Support::Unknown ? cap::Support::Unsupported : support;
     h_textures_[request.id] = (TextureObject)info.texObj;
     h_residentFlags_[request.id / 32] |= 1u << (request.id % 32);
@@ -1177,7 +1261,7 @@ DemandTextureLoader::Impl::LoadOutcome DemandTextureLoader::Impl::loadTexture(co
 }
 
 bool DemandTextureLoader::Impl::loadStorage(ImageStorage& info, const TextureDesc& desc, cap::MipPolicy policy,
-                                            cap::Support& support) {
+                                            cap::Support& support, uint32_t maxAnisotropy) {
     std::unique_lock<std::mutex> lock(mutex_);
     if (!cleanupStorageResources(info) || info.array || info.mipmapArray)
         return false;
@@ -1320,7 +1404,7 @@ bool DemandTextureLoader::Impl::loadStorage(ImageStorage& info, const TextureDes
     if (useMipmaps) {
         Probe* result = nullptr;
         try {
-            result = &probeMipmaps(desc, image.isFloat());
+            result = &probeMipmaps(desc, image.isFloat(), maxAnisotropy);
         } catch (const std::bad_alloc&) {
             lock.lock();
             info.primary = {Outcome::HostOutOfMemory, cap::Operation::ProbeAllocate, 0};
@@ -1634,7 +1718,7 @@ bool DemandTextureLoader::Impl::publishMappingsLocked(bool retiring) {
             info.status.primary.outcome != Outcome::Cancelled) {
             info.status.primary = {};
             if (info.status.published)
-                info.status.state = info.storage->reason == cap::Reason::CapabilityFallback ?
+                info.status.state = info.storage->reason == cap::Reason::CapabilityFallback || anisotropyDegraded(info) ?
                                     cap::State::Degraded : cap::State::Resident;
         }
     }
@@ -1912,7 +1996,7 @@ void DemandTextureLoader::Impl::updateEvictionPriority(uint32_t texId, EvictionP
         }
         textures_[texId].desc = desc;
         textures_[texId].status.requested = desc;
-        textures_[texId].descriptorHash = internal::TextureDescHash{}(desc);
+        textures_[texId].descriptorHash = internal::samplerHash(desc, textures_[texId].policy, textures_[texId].anisotropy);
     } else {
         lastError_ = LoaderError::InvalidTextureId;
         logMessage(LogLevel::Error, "updateEvictionPriority: invalid texture ID %u", texId);

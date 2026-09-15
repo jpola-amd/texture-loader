@@ -38,6 +38,18 @@ std::vector<HipCallRecord> HipFaultState::records() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return records_;
 }
+
+void HipFaultState::overrideReturnedAnisotropy(unsigned int value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    overrideAnisotropy_ = true;
+    returnedAnisotropy_ = value;
+}
+
+void HipFaultState::observeSampler(hipTextureDesc& sampler) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (overrideAnisotropy_)
+        sampler.maxAnisotropy = returnedAnisotropy_;
+}
 } // namespace internal
 } // namespace hip_demand
 #endif

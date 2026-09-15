@@ -92,6 +92,38 @@ cmake --build build/debug
 
 See [BUILD.md](BUILD.md) for detailed build instructions.
 
+## Experimental anisotropy requests
+
+The additive host API in
+[DemandTextureLoader.h](include/DemandLoading/DemandTextureLoader.h) provides
+`createTextureAnisotropyV1` (filename/source), `createTextureFromMemoryAnisotropyV1`,
+and `getTextureAnisotropyStatusV1`. Existing descriptor layouts and creation
+entry points are unchanged; legacy calls still submit `maxAnisotropy=0`.
+
+`anisotropy_v1::Request` accepts explicit ratios 1 through 16. One requests
+disabled anisotropy; this is an application contract, not a guarantee that HIP
+accepts the setting. Ratios affect sampler identity, not compatible image
+backing. The default request allows **unqualified** native sampling, and
+successful requests above one report degradation. It does not authorize
+silently substituting zero or base-level storage after an anisotropy failure.
+Mip fallback remains separately controlled by `capability_v1::Policy`.
+
+`Request::parity()` requests 16 with `RequireQualified`. No configuration is
+currently certified, so strict requests fail residency explicitly without
+allocating or publishing a sampler. Registration success and ticket completion
+are not residency success. Query the per-texture status before retrying a
+terminal failure: it separates requested/submitted/HIP-returned settings,
+operation support, pixel qualification, resource limitations and primary/cleanup
+errors. The unchanged device sampling Boolean alone is not quality proof.
+
+On the tested Windows `gfx1201` TheRock 7.14.0rc3 stack, HIP rejects nonzero
+anisotropy with `hipErrorNotSupported`; configurable **filtering support remains
+blocked**, not silently downgraded. See
+[item 06](docs/implementation-plan/06-anisotropy-qualification.md) for the
+portable strict qualification series and evidence. Matching rebuilt headers,
+loader and host toolchain are required for the new versioned C++ API; Arnold
+shim/deployment integration is not included.
+
 ## Architecture
 
 ### Core Components

@@ -39,6 +39,8 @@ add_executable(texture_loader_tests
     TextureSamplingTests.cpp
     SamplerStorageTests.cpp
     CapabilityTests.cpp
+    AnisotropyTests.cpp
+    AnisotropySamplingTests.cpp
 )
 
 target_include_directories(texture_loader_tests
@@ -112,7 +114,7 @@ gtest_discover_tests(shared_contract_tests WORKING_DIRECTORY "${PROJECT_BINARY_D
 
 # Native image decode regressions do not initialize a GPU. This separate
 # target can also be built and run with address/undefined sanitizers.
-add_executable(image_data_tests ImageDataTests.cpp SamplingTestUtilsTests.cpp)
+add_executable(image_data_tests ImageDataTests.cpp SamplingTestUtilsTests.cpp AnisotropyReferenceTests.cpp)
 target_include_directories(image_data_tests PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(image_data_tests PRIVATE hip::host GTest::gtest_main)
 target_compile_definitions(image_data_tests PRIVATE __HIP_PLATFORM_AMD__)

@@ -102,7 +102,7 @@ enum class Operation : uint32_t {
     None, SelectDevice, SourceRead, ProbeAllocate, ProbeGetLevel, ProbeUpload,
     ProbeCreateSampler, ProbeDestroySampler, ProbeFree, AllocateMipmapped,
     AllocateArray, GetLevel, Upload, CreateSampler, ReadSampler, Publish,
-    DestroySampler, FreeMipmapped, FreeArray
+    DestroySampler, FreeMipmapped, FreeArray, QualifySampler
 };
 
 struct Policy {
@@ -148,6 +148,56 @@ static_assert(std::is_standard_layout<Status>::value && std::is_trivially_copyab
               "Capability status must remain a plain host snapshot");
 
 } // namespace capability_v1
+
+namespace anisotropy_v1 {
+
+constexpr uint32_t Version = 1;
+enum class Profile : uint32_t { LegacyCompatibility, Explicit, Parity16 };
+enum class Requirement : uint32_t { AllowUnqualified, RequireQualified };
+enum class Qualification : uint32_t { Unqualified, Qualified };
+enum Limitation : uint32_t {
+    None = 0, LegacySetting = 1, UnqualifiedBehavior = 2,
+    SingleLevel = 4, DescriptorMismatch = 8, BaseLevelFallback = 16
+};
+
+// Additive host API; TextureDesc and capability_v1 layouts remain unchanged.
+// The 1..16 range is a loader policy, not a measured hardware capability.
+struct Request {
+    contract_v1::AbiHeader abi{Version, sizeof(Request)};
+    Profile profile = Profile::Explicit;
+    uint32_t maxAnisotropy = 1;
+    Requirement requirement = Requirement::AllowUnqualified;
+
+    static Request legacy() {
+        return {{Version, sizeof(Request)}, Profile::LegacyCompatibility, 0, Requirement::AllowUnqualified};
+    }
+    static Request parity() {
+        return {{Version, sizeof(Request)}, Profile::Parity16, 16, Requirement::RequireQualified};
+    }
+};
+
+inline bool operator==(const Request& a, const Request& b) {
+    return a.abi.version == b.abi.version && a.abi.byteSize == b.abi.byteSize &&
+           a.profile == b.profile && a.maxAnisotropy == b.maxAnisotropy && a.requirement == b.requirement;
+}
+
+struct Status {
+    contract_v1::AbiHeader abi{Version, sizeof(Status)};
+    Request requested{};
+    capability_v1::Status texture{};
+    Qualification qualification = Qualification::Unqualified;
+    capability_v1::Support samplerSupport = capability_v1::Support::Unknown;
+    uint32_t limitations = None;
+    uint32_t requirementRejected = 0;
+};
+
+static_assert(sizeof(Request) == 20 && offsetof(Request, maxAnisotropy) == 12 &&
+              std::is_standard_layout<Request>::value && std::is_trivially_copyable<Request>::value,
+              "Anisotropy request ABI changed");
+static_assert(std::is_standard_layout<Status>::value && std::is_trivially_copyable<Status>::value,
+              "Anisotropy status must remain a plain host snapshot");
+
+} // namespace anisotropy_v1
 
 class DemandTextureLoader {
 public:
@@ -200,6 +250,22 @@ public:
     // success; degraded base fallback is never mip-filter qualification.
     // Support reports operations only; no runtime probe certifies pixel behavior.
     contract_v1::Outcome getTextureStatusV1(uint32_t textureId, capability_v1::Status& status) const;
+
+    // Immutable anisotropy request, independent of compatible image backing.
+    // Legacy APIs still submit zero. Explicit 1 disables anisotropy; 2..16
+    // permit native, unqualified sampling with observable degradation.
+    // Strict requests (including parity()) fail residency until the exact
+    // configuration has pixel qualification. No configurations are certified
+    // by this implementation; successful HIP calls/readback are not proof.
+    TextureHandle createTextureAnisotropyV1(const std::string& filename, const TextureDesc& desc,
+        const anisotropy_v1::Request& request, const capability_v1::Policy& policy = {});
+    TextureHandle createTextureAnisotropyV1(std::shared_ptr<ImageSource> source, const TextureDesc& desc,
+        const anisotropy_v1::Request& request, const capability_v1::Policy& policy = {});
+    TextureHandle createTextureFromMemoryAnisotropyV1(const void* data, int width, int height, int channels,
+        const TextureDesc& desc, const anisotropy_v1::Request& request, const capability_v1::Policy& policy = {});
+    // Requested, submitted and returned fields are separate from qualification.
+    // The nested snapshot retains resource, owner and primary/cleanup evidence.
+    contract_v1::Outcome getTextureAnisotropyStatusV1(uint32_t textureId, anisotropy_v1::Status& status) const;
 
     // Prepare for launch (updates device context). This implementation uses a
     // serialized, device-quiescent publication/retirement baseline; table copies

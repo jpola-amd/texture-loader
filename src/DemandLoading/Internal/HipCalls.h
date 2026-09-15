@@ -39,11 +39,15 @@ public:
     hipError_t before(HipOperation operation);
     void record(HipOperation operation, hipError_t error, bool injected);
     std::vector<HipCallRecord> records() const;
+    void overrideReturnedAnisotropy(unsigned int value);
+    void observeSampler(hipTextureDesc& sampler);
 private:
     struct Rule { HipOperation operation; hipError_t error; size_t remaining; };
     mutable std::mutex mutex_;
     std::vector<Rule> rules_;
     std::vector<HipCallRecord> records_;
+    bool overrideAnisotropy_ = false;
+    unsigned int returnedAnisotropy_ = 0;
 };
 
 std::shared_ptr<HipFaultState> currentHipFaultState();
@@ -52,6 +56,15 @@ void setHipFaultState(std::shared_ptr<HipFaultState> state);
 
 class HipCalls {
 public:
+    void observeSampler(hipTextureDesc& sampler) const {
+#ifdef HIP_DEMAND_TEST_HOOKS
+        if (state_)
+            state_->observeSampler(sampler);
+#else
+        (void)sampler;
+#endif
+    }
+
     template<class F> hipError_t call(HipOperation operation, F&& realCall) const {
         hipError_t error = hipSuccess;
         bool injected = false;

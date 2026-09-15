@@ -30,6 +30,16 @@ struct TextureDescHash {
     }
 };
 
+inline size_t samplerHash(const TextureDesc& desc, capability_v1::MipPolicy policy,
+                          const anisotropy_v1::Request& request) noexcept {
+    size_t hash = TextureDescHash{}(desc);
+    hashTextureField(hash, static_cast<size_t>(policy));
+    hashTextureField(hash, static_cast<size_t>(request.profile));
+    hashTextureField(hash, request.maxAnisotropy);
+    hashTextureField(hash, static_cast<size_t>(request.requirement));
+    return hash;
+}
+
 enum class StorageIdentity { Filename, Source, Content };
 
 struct StorageKey {

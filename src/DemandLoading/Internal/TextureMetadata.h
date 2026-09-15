@@ -59,6 +59,7 @@ struct TextureMetadata {
     hipError_t primaryHipError = hipSuccess;
     hipError_t cleanupHipError = hipSuccess;
     capability_v1::MipPolicy policy = capability_v1::MipPolicy::LegacyCompatibility;
+    anisotropy_v1::Request anisotropy = anisotropy_v1::Request::legacy();
     capability_v1::Status status{};
 
     TextureMetadata() = default;
@@ -75,6 +76,7 @@ struct TextureMetadata {
             primaryHipError = other.primaryHipError;
             cleanupHipError = other.cleanupHipError;
             policy = other.policy;
+            anisotropy = other.anisotropy;
             status = other.status;
         }
         return *this;
