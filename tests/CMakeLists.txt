@@ -38,6 +38,7 @@ add_executable(texture_loader_tests
     TextureSamplingHarness.cpp
     TextureSamplingTests.cpp
     SamplerStorageTests.cpp
+    CapabilityTests.cpp
 )
 
 target_include_directories(texture_loader_tests

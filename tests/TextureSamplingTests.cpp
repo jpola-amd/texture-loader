@@ -632,8 +632,10 @@ TEST_P(MipFilteringTest, AuthoredChainSamplerStateAndReload) {
             if (pass == 0)
                 registeredId = handle.id;
             EXPECT_EQ(handle.id, registeredId);
-            ASSERT_NO_FATAL_FAILURE(verifyStorage(*source, texture, true, levels));
-            ASSERT_NO_FATAL_FAILURE(verifySampler(texture, desc, levels));
+            // An explicit one-level policy uses an intentional ordinary array,
+            // not a capability fallback. Keep every authored-byte/pixel check.
+            ASSERT_NO_FATAL_FAILURE(verifyStorage(*source, texture, levels > 1, levels));
+            ASSERT_NO_FATAL_FAILURE(verifySampler(texture, desc, levels, levels > 1));
             std::vector<SamplingInput> inputs;
             for (unsigned int level = 0; level < levels; ++level)
                 inputs.push_back(inputFor(handle.id, SamplingPath::Lod, .5f, .5f, float(level)));

@@ -197,7 +197,7 @@ TEST(SharedOutcomes, InvalidDefaultsDoNotAliasZero) {
     RegistrationResult success{key, Outcome::Success};
     EXPECT_TRUE(success.succeeded());
     EXPECT_EQ(success.key.slot, 0);
-    for (uint32_t value = 1; value <= static_cast<uint32_t>(Outcome::RuntimeFailure); ++value) {
+    for (uint32_t value = 1; value <= static_cast<uint32_t>(Outcome::HostOutOfMemory); ++value) {
         failed.outcome = static_cast<Outcome>(value);
         EXPECT_FALSE(failed.succeeded());
     }
@@ -206,7 +206,7 @@ TEST(SharedOutcomes, InvalidDefaultsDoNotAliasZero) {
 }
 
 TEST(SharedOutcomes, RetryabilityIsExplicitForEveryOutcome) {
-    for (uint32_t value = 0; value <= static_cast<uint32_t>(Outcome::RuntimeFailure); ++value) {
+    for (uint32_t value = 0; value <= static_cast<uint32_t>(Outcome::HostOutOfMemory); ++value) {
         const auto outcome = static_cast<Outcome>(value);
         const bool expected = outcome == Outcome::Pending || outcome == Outcome::Deferred ||
                               outcome == Outcome::RequestOverflow;
@@ -250,6 +250,7 @@ TEST(SharedOutcomes, TerminalKeysAndResidencyNeverGenerateDemand) {
     EXPECT_FALSE(resolve(context, key, 1, 0, {}).needsRequest());
     texture.state = RegistrationState::Live;
     for (const auto outcome : {Outcome::SourceFailure, Outcome::Unsupported, Outcome::DeviceOutOfMemory,
+                               Outcome::HostOutOfMemory,
                                Outcome::Cancelled, Outcome::NoProgress, Outcome::DemandTooLarge}) {
         texture.residency = outcome;
         const auto decision = resolve(context, key, 1, 0, {});

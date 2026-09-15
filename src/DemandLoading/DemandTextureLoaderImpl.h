@@ -38,10 +38,17 @@ public:
     Impl& operator=(const Impl&) = delete;
 
     // Public API implementations
-    TextureHandle createTexture(const std::string& filename, const TextureDesc& desc);
-    TextureHandle createTexture(std::shared_ptr<ImageSource> imageSource, const TextureDesc& desc);
+    TextureHandle createTexture(const std::string& filename, const TextureDesc& desc,
+        const capability_v1::Policy& policy = {{capability_v1::Version, sizeof(capability_v1::Policy)},
+                                              capability_v1::MipPolicy::LegacyCompatibility});
+    TextureHandle createTexture(std::shared_ptr<ImageSource> imageSource, const TextureDesc& desc,
+        const capability_v1::Policy& policy = {{capability_v1::Version, sizeof(capability_v1::Policy)},
+                                              capability_v1::MipPolicy::LegacyCompatibility});
     TextureHandle createTextureFromMemory(const void* data, int width, int height,
-                                         int channels, const TextureDesc& desc);
+        int channels, const TextureDesc& desc,
+        const capability_v1::Policy& policy = {{capability_v1::Version, sizeof(capability_v1::Policy)},
+                                              capability_v1::MipPolicy::LegacyCompatibility});
+    contract_v1::Outcome getTextureStatusV1(uint32_t id, capability_v1::Status& status) const;
     void launchPrepare(hipStream_t stream);
     DeviceContext getDeviceContext() const;
     size_t processRequests(hipStream_t stream, const DeviceContext& deviceContext);
@@ -65,7 +72,9 @@ private:
     TextureHandle registrationFailure(LoaderError error);
     TextureHandle commitRegistration(internal::TextureMetadata&& info);
     TextureHandle registeredHandle(uint32_t id) const;
-    uint32_t findSampler(const internal::ImageStorage& storage, const TextureDesc& desc) const;
+    uint32_t findSampler(const internal::ImageStorage& storage, const TextureDesc& desc,
+                         capability_v1::MipPolicy policy) const;
+    void refreshStorageStatusLocked(internal::ImageStorage& storage);
     bool cleanupTextureResources(internal::TextureMetadata& info);
     bool cleanupStorageResources(internal::ImageStorage& storage);
     bool selectDevice();
@@ -93,7 +102,8 @@ private:
     };
     enum class LoadOutcome { NotLoaded, StorageFailed, Loaded };
     LoadOutcome loadTexture(const LoadRequest& request);
-    bool loadStorage(internal::ImageStorage& storage, const TextureDesc& desc);
+    bool loadStorage(internal::ImageStorage& storage, const TextureDesc& desc, capability_v1::MipPolicy policy,
+                     capability_v1::Support& support);
     void destroyTexture(uint32_t texId);
     void evictIfNeeded(size_t requiredMemory,
                        const std::unordered_set<internal::ImageStorage*>& requestedStorage);
@@ -104,7 +114,8 @@ private:
 
     // Mipmap generation
     bool generateMipLevels(hipMipmappedArray_t mipmapArray, const internal::ImageData& baseImage,
-                          int numLevels, ImageSource* source, bool sourceSRGB, hipError_t& error);
+                          int numLevels, ImageSource* source, bool sourceSRGB, hipError_t& error,
+                          capability_v1::Operation& operation);
 
     // Configuration
     LoaderOptions options_;
@@ -112,6 +123,9 @@ private:
     LoaderError initializationError_ = LoaderError::HipError;
     int device_;
     bool deviceKnown_ = false;
+    hipCtx_t ownerContext_ = nullptr;
+    std::atomic<hipError_t> lastDeviceError_{hipSuccess};
+    capability_v1::Status identityStatus_{};
     mutable std::mutex mutex_;
     // Runtime operations are serialized independently of registration/metadata.
     // Never acquire this mutex while holding mutex_: a decoder can need mutex_.
@@ -170,10 +184,20 @@ private:
 
     std::atomic<LoaderError> lastError_{LoaderError::Success};
 
-    // Mipmap capability detection (requires mutex_)
-    bool mipmapsSupportChecked_ = false;
-    bool mipmapsSupported_ = true;
-    hipMipmappedArray_t mipmapProbe_ = nullptr;
+    // Probe cache and retained rollback resources are scoped to this loader's
+    // owning primary context lifetime; operationMutex_ serializes access.
+    struct Probe {
+        TextureDesc desc{};
+        bool floatPixels = false;
+        capability_v1::Support support = capability_v1::Support::Unknown;
+        capability_v1::Failure primary{}, cleanup{};
+        hipMipmappedArray_t array = nullptr;
+        hipTextureObject_t sampler = 0;
+        size_t bytes = 0;
+    };
+    std::vector<Probe> probes_;
+    Probe& probeMipmaps(const TextureDesc& desc, bool floatPixels);
+    bool cleanupProbe(Probe& probe);
 };
 
 } // namespace hip_demand

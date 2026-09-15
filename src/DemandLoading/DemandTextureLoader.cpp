@@ -20,6 +20,7 @@ const char* getErrorString(LoaderError error) {
         case LoaderError::OutOfMemory:        return "Out of memory";
         case LoaderError::InvalidParameter:   return "Invalid parameter";
         case LoaderError::HipError:           return "HIP error";
+        case LoaderError::Unsupported:        return "Required texture operation unsupported";
         default:                              return "Unknown error";
     }
 }
@@ -47,6 +48,25 @@ TextureHandle DemandTextureLoader::createTextureFromMemory(const void* data,
                                                            int width, int height, int channels,
                                                            const TextureDesc& desc) {
     return impl_->createTextureFromMemory(data, width, height, channels, desc);
+}
+
+TextureHandle DemandTextureLoader::createTextureV1(const std::string& filename, const TextureDesc& desc,
+                                                   const capability_v1::Policy& policy) {
+    return impl_->createTexture(filename, desc, policy);
+}
+
+TextureHandle DemandTextureLoader::createTextureV1(std::shared_ptr<ImageSource> source, const TextureDesc& desc,
+                                                   const capability_v1::Policy& policy) {
+    return impl_->createTexture(std::move(source), desc, policy);
+}
+
+TextureHandle DemandTextureLoader::createTextureFromMemoryV1(const void* data, int width, int height, int channels,
+                                                             const TextureDesc& desc, const capability_v1::Policy& policy) {
+    return impl_->createTextureFromMemory(data, width, height, channels, desc, policy);
+}
+
+contract_v1::Outcome DemandTextureLoader::getTextureStatusV1(uint32_t id, capability_v1::Status& status) const {
+    return impl_->getTextureStatusV1(id, status);
 }
 
 void DemandTextureLoader::launchPrepare(hipStream_t stream) {

@@ -41,12 +41,14 @@ struct StorageKey {
     bool sRGB = false;
     bool generateMipmaps = true;
     unsigned int maxMipLevel = 0;
+    bool mipEnabled = true;
 
     bool operator==(const StorageKey& other) const noexcept {
         return identity == other.identity && filename == other.filename &&
                source == other.source && contentHash == other.contentHash &&
                metadata == other.metadata && sRGB == other.sRGB &&
-               generateMipmaps == other.generateMipmaps && maxMipLevel == other.maxMipLevel;
+               generateMipmaps == other.generateMipmaps && maxMipLevel == other.maxMipLevel &&
+               mipEnabled == other.mipEnabled;
     }
 };
 
@@ -66,6 +68,7 @@ struct StorageKeyHash {
         hashTextureField(hash, key.sRGB);
         hashTextureField(hash, key.generateMipmaps);
         hashTextureField(hash, key.maxMipLevel);
+        hashTextureField(hash, key.mipEnabled);
         return hash;
     }
 };

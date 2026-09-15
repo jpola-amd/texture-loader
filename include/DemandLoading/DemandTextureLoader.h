@@ -6,6 +6,7 @@
 
 #include "DemandLoading/DeviceContext.h"
 #include "DemandLoading/Ticket.h"
+#include "DemandLoading/Contracts.h"
 #include <string>
 #include <memory>
 #include <vector>
@@ -24,7 +25,8 @@ enum class LoaderError {
     ImageLoadFailed,
     OutOfMemory,
     InvalidParameter,
-    HipError
+    HipError,
+    Unsupported
 };
 
 const char* getErrorString(LoaderError error);
@@ -88,6 +90,65 @@ struct TextureHandle {
     LoaderError error = LoaderError::InvalidTextureId;
 };
 
+namespace capability_v1 {
+
+constexpr uint32_t Version = 1;
+enum class MipPolicy : uint32_t { LegacyCompatibility, Disabled, Required, AllowBaseLevelFallback };
+enum class State : uint32_t { Registered, Pending, Resident, Degraded, Failed, Unloaded, Cancelled };
+enum class Support : uint32_t { Unknown, OperationSupported, BehaviorQualified, Unsupported };
+enum class Resource : uint32_t { None, Array, MipmappedArray };
+enum class Reason : uint32_t { None, Disabled, Singleton, LevelLimit, LegacyBaseOnly, CapabilityFallback };
+enum class Operation : uint32_t {
+    None, SelectDevice, SourceRead, ProbeAllocate, ProbeGetLevel, ProbeUpload,
+    ProbeCreateSampler, ProbeDestroySampler, ProbeFree, AllocateMipmapped,
+    AllocateArray, GetLevel, Upload, CreateSampler, ReadSampler, Publish,
+    DestroySampler, FreeMipmapped, FreeArray
+};
+
+struct Policy {
+    contract_v1::AbiHeader abi{Version, sizeof(Policy)};
+    MipPolicy mipPolicy = MipPolicy::Required;
+};
+
+struct Failure {
+    contract_v1::Outcome outcome = contract_v1::Outcome::Success;
+    Operation operation = Operation::None;
+    int32_t rawHipError = 0;
+};
+
+// Host-only C++/HIP ABI: use matching headers, SDK and compiler. No legacy
+// descriptor, handle, Ticket or DeviceContext layout is changed.
+struct Status {
+    contract_v1::AbiHeader abi{Version, sizeof(Status)};
+    uint32_t textureId = InvalidTextureId;
+    MipPolicy policy = MipPolicy::LegacyCompatibility;
+    State state = State::Registered;
+    Support capability = Support::Unknown;
+    Resource resource = Resource::None;
+    Reason reason = Reason::None;
+    uint32_t originalWidth = 0, originalHeight = 0, originalLevels = 0;
+    uint32_t firstResidentMip = UINT32_MAX, lastResidentMip = UINT32_MAX;
+    uint32_t resourceWidth = 0, resourceHeight = 0, resourceLevels = 0;
+    uint64_t payloadBytes = 0;
+    uint64_t attempts = 0;
+    int32_t device = -1, runtimeVersion = 0, driverVersion = 0;
+    uint64_t ownerContext = 0;
+    char deviceName[256]{};
+    char architecture[256]{};
+    TextureDesc requested{};
+    hipTextureDesc submittedSampler{};
+    hipTextureDesc returnedSampler{};
+    uint32_t submitted = 0, returned = 0, published = 0;
+    Failure primary{}, cleanup{}, fallback{};
+};
+
+static_assert(sizeof(Policy) == 12 && std::is_standard_layout<Policy>::value,
+              "Capability policy ABI changed");
+static_assert(std::is_standard_layout<Status>::value && std::is_trivially_copyable<Status>::value,
+              "Capability status must remain a plain host snapshot");
+
+} // namespace capability_v1
+
 class DemandTextureLoader {
 public:
     explicit DemandTextureLoader(const LoaderOptions& options = LoaderOptions());
@@ -122,6 +183,23 @@ public:
     TextureHandle createTextureFromMemory(const void* data, 
                                          int width, int height, int channels,
                                          const TextureDesc& desc = TextureDesc());
+
+    // Explicit mip semantics. Required/allowed policies retain authored levels
+    // even with generation disabled; missing required levels then fail. Disabled
+    // publishes only the original base. maxMipLevel remains a level count.
+    // Policy participates in sampler identity, not compatible backing identity.
+    TextureHandle createTextureV1(const std::string& filename, const TextureDesc& desc,
+                                  const capability_v1::Policy& policy = {});
+    TextureHandle createTextureV1(std::shared_ptr<ImageSource> imageSource, const TextureDesc& desc,
+                                  const capability_v1::Policy& policy = {});
+    TextureHandle createTextureFromMemoryV1(const void* data, int width, int height, int channels,
+                                            const TextureDesc& desc, const capability_v1::Policy& policy = {});
+
+    // Pollable per-registration snapshot, including while a source read blocks.
+    // Validates version/size and ID before writing output. Completion is not
+    // success; degraded base fallback is never mip-filter qualification.
+    // Support reports operations only; no runtime probe certifies pixel behavior.
+    contract_v1::Outcome getTextureStatusV1(uint32_t textureId, capability_v1::Status& status) const;
 
     // Prepare for launch (updates device context). This implementation uses a
     // serialized, device-quiescent publication/retirement baseline; table copies

@@ -43,6 +43,9 @@ struct ImageStorage {
     LoaderError lastError = LoaderError::Success;
     hipError_t primaryHipError = hipSuccess;
     hipError_t cleanupHipError = hipSuccess;
+    capability_v1::Failure primary{}, cleanup{}, fallback{};
+    capability_v1::Reason reason = capability_v1::Reason::None;
+    unsigned int originalLevels = 0;
 };
 
 struct TextureMetadata {
@@ -55,6 +58,8 @@ struct TextureMetadata {
     LoaderError lastError = LoaderError::Success;
     hipError_t primaryHipError = hipSuccess;
     hipError_t cleanupHipError = hipSuccess;
+    capability_v1::MipPolicy policy = capability_v1::MipPolicy::LegacyCompatibility;
+    capability_v1::Status status{};
 
     TextureMetadata() = default;
     TextureMetadata(TextureMetadata&& other) noexcept { *this = std::move(other); }
@@ -69,6 +74,8 @@ struct TextureMetadata {
             lastError = other.lastError;
             primaryHipError = other.primaryHipError;
             cleanupHipError = other.cleanupHipError;
+            policy = other.policy;
+            status = other.status;
         }
         return *this;
     }

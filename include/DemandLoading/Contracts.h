@@ -22,7 +22,7 @@ enum class Outcome : uint32_t {
     Success, Pending, Deferred, InvalidKey, InvalidInput, SourceFailure,
     Unsupported, DeviceOutOfMemory, CapacityExhausted, DemandTooLarge,
     ProtectedBudgetExhausted, Cancelled, NoProgress, RequestOverflow,
-    IdentityExhausted, AbiMismatch, InvalidTransition, RuntimeFailure
+    IdentityExhausted, AbiMismatch, InvalidTransition, RuntimeFailure, HostOutOfMemory
 };
 
 HIP_DEMAND_CONTRACT_HD constexpr bool retryable(Outcome value) {

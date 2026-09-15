@@ -560,10 +560,12 @@ TEST_F(RegistrationErrors, FaultStateIsIsolatedResetAndRetainsRawErrors) {
     request(*first, {a.id}, 0);
     EXPECT_EQ(first->getLastError(), LoaderError::HipError);
     const auto records = state->records();
-    ASSERT_FALSE(records.empty());
-    EXPECT_EQ(records.back().operation, HipOperation::AllocateArray);
-    EXPECT_EQ(records.back().error, hipErrorInvalidValue);
-    EXPECT_TRUE(records.back().injected);
+    const auto allocation = std::find_if(records.rbegin(), records.rend(), [](const auto& record) {
+        return record.operation == HipOperation::AllocateArray;
+    });
+    ASSERT_NE(allocation, records.rend());
+    EXPECT_EQ(allocation->error, hipErrorInvalidValue);
+    EXPECT_TRUE(allocation->injected);
     request(*first, {a.id}, 1);
     EXPECT_EQ(first->getResidentTextureCount(), 1u);
 }
