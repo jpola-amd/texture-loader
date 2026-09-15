@@ -71,6 +71,7 @@ endif()
 
 # Library
 set(TEXTURE_LOADER_SOURCES
+    src/DemandLoading/Contracts.cpp
     src/DemandLoading/DemandTextureLoader.cpp
     src/DemandLoading/DemandTextureLoaderImpl.cpp
     src/DemandLoading/Ticket.cpp
