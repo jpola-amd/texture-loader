@@ -21,7 +21,7 @@ enum class HipOperation {
     CacheData, FilenameMap, SourceMap, ContentMap,
     InvalidateMappings, SynchronizeConsumers, PublishMappings,
     SelectDevice, GetContext, ProbeAllocate, ProbeGetLevel, ProbeUpload,
-    ProbeCreateSampler, ProbeDestroySampler, ProbeFree, GetLevel, ReadSampler
+    ProbeCreateSampler, ProbeDestroySampler, ProbeFree, GetLevel, ReadSampler, FreeHost, FreeDevice
 };
 
 #ifdef HIP_DEMAND_TEST_HOOKS

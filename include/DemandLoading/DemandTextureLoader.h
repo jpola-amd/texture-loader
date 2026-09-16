@@ -102,7 +102,7 @@ enum class Operation : uint32_t {
     None, SelectDevice, SourceRead, ProbeAllocate, ProbeGetLevel, ProbeUpload,
     ProbeCreateSampler, ProbeDestroySampler, ProbeFree, AllocateMipmapped,
     AllocateArray, GetLevel, Upload, CreateSampler, ReadSampler, Publish,
-    DestroySampler, FreeMipmapped, FreeArray, QualifySampler
+    DestroySampler, FreeMipmapped, FreeArray, QualifySampler, AllocateHost, FreeHost, FreeDevice
 };
 
 struct Policy {

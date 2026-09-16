@@ -74,6 +74,7 @@ set(TEXTURE_LOADER_SOURCES
     src/DemandLoading/Contracts.cpp
     src/DemandLoading/DemandTextureLoader.cpp
     src/DemandLoading/DemandTextureLoaderImpl.cpp
+    src/DemandLoading/WholeMipTexture.cpp
     src/DemandLoading/Ticket.cpp
     src/DemandLoading/Logging.cpp
     src/DemandLoading/Internal/HipCalls.cpp

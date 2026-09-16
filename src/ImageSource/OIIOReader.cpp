@@ -3,8 +3,8 @@
 #include "../DemandLoading/Internal/ImageData.h"
 #include <OpenImageIO/imageio.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
-#include <cstring>
 #include <stdexcept>
 
 namespace hip_demand {
@@ -42,6 +42,14 @@ size_t levelBytes(const TextureInfo& info, unsigned int width, unsigned int heig
                                    getBytesPerChannel(info.format));
 }
 
+bool matchesLevel(const OIIO::ImageSpec& spec, const TextureInfo& info,
+                  unsigned int level) {
+    return spec.width == static_cast<int>(std::max(1u, info.width >> level)) &&
+           spec.height == static_cast<int>(std::max(1u, info.height >> level)) &&
+           spec.depth == 1 && spec.nchannels == static_cast<int>(info.numChannels) &&
+           imageFormat(spec.format) == info.format;
+}
+
 } // namespace
 
 OIIOReader::OIIOReader(const std::string& filename) : filename_(filename) {}
@@ -56,7 +64,7 @@ void OIIOReader::open(TextureInfo* info) {
     const auto start = std::chrono::high_resolution_clock::now();
     auto input = OIIO::ImageInput::open(filename_);
     if (!input) throw std::runtime_error("Failed to open image: " + filename_);
-    const OIIO::ImageSpec& spec = input->spec();
+    const OIIO::ImageSpec spec = input->spec();
     if (spec.width <= 0 || spec.height <= 0 || spec.depth != 1 ||
         spec.nchannels < 1 || spec.nchannels > 4)
         throw std::runtime_error("Unsupported OIIO texture dimensions or channels: " + filename_);
@@ -68,10 +76,20 @@ void OIIOReader::open(TextureInfo* info) {
     opened.format = imageFormat(spec.format);
     opened.isTiled = spec.tile_width > 0;
     opened.numMipLevels = 1;
-    const unsigned int fullLevels = calculateNumMipLevels(opened.width, opened.height);
+    levelBytes(opened, opened.width, opened.height);
+    unsigned int fullLevels = 1;
+    for (unsigned int size = std::max(opened.width, opened.height); size > 1; size /= 2)
+        ++fullLevels;
     for (unsigned int level = 1; level < fullLevels; ++level) {
-        OIIO::ImageSpec mipSpec;
-        if (!input->seek_subimage(0, static_cast<int>(level), mipSpec)) break;
+        if (!input->seek_subimage(0, static_cast<int>(level))) {
+            const std::string error = input->geterror();
+            if (!error.empty())
+                throw std::runtime_error("Failed to read mip metadata: " + filename_ + ": " + error);
+            break;
+        }
+        const OIIO::ImageSpec mipSpec = input->spec();
+        if (mipSpec.format != spec.format || mipSpec.channelformats != spec.channelformats)
+            throw std::runtime_error("Inconsistent OIIO mip pixel formats: " + filename_);
         if (mipSpec.width != static_cast<int>(std::max(1u, opened.width >> level)) ||
             mipSpec.height != static_cast<int>(std::max(1u, opened.height >> level)) ||
             mipSpec.depth != 1 || mipSpec.nchannels != static_cast<int>(opened.numChannels))
@@ -81,8 +99,9 @@ void OIIOReader::open(TextureInfo* info) {
         ++opened.numMipLevels;
     }
     opened.isValid = true;
-    levelBytes(opened, opened.width, opened.height);
-    input->close();
+    if (!input->close())
+        throw std::runtime_error("Failed to close image metadata: " + filename_ +
+                                 ": " + input->geterror());
     info_ = opened;
     isOpen_ = true;
     if (info) *info = info_;
@@ -103,39 +122,31 @@ bool OIIOReader::isOpen() const {
 
 const TextureInfo& OIIOReader::getInfo() const { return info_; }
 
-bool OIIOReader::loadImage() {
-    if (!isOpen_) return false;
+bool OIIOReader::readMipLevelLocked(char* dest, unsigned int level) {
     const auto start = std::chrono::high_resolution_clock::now();
     auto input = OIIO::ImageInput::open(filename_);
     if (!input) return false;
+    const OIIO::ImageSpec baseSpec = input->spec();
+    if (!matchesLevel(baseSpec, info_, 0) ||
+        (baseSpec.tile_width > 0) != info_.isTiled)
+        return false;
+    if (!input->seek_subimage(0, static_cast<int>(level))) return false;
+    const OIIO::ImageSpec spec = input->spec();
+    if (!matchesLevel(spec, info_, level) || spec.format != baseSpec.format ||
+        spec.channelformats != baseSpec.channelformats)
+        return false;
+
+    const unsigned int width = std::max(1u, info_.width >> level);
+    const unsigned int height = std::max(1u, info_.height >> level);
+    const size_t size = levelBytes(info_, width, height);
     const OIIO::TypeDesc type = pixelType(info_.format);
-    std::vector<std::vector<unsigned char>> levels(info_.numMipLevels);
-    unsigned long long bytesRead = 0;
-    unsigned int width = info_.width;
-    unsigned int height = info_.height;
-    for (unsigned int level = 0; level < info_.numMipLevels; ++level) {
-        OIIO::ImageSpec spec;
-        if (input->seek_subimage(0, static_cast<int>(level), spec)) {
-            if (spec.width != static_cast<int>(width) || spec.height != static_cast<int>(height) ||
-                spec.depth != 1 || spec.nchannels != static_cast<int>(info_.numChannels))
-                return false;
-            levels[level].resize(levelBytes(info_, width, height));
-            if (!input->read_image(0, static_cast<int>(level), 0, spec.nchannels,
-                                   type, levels[level].data()))
-                return false;
-            bytesRead += levels[level].size();
-        } else {
-            return false;
-        }
-        width = std::max(1u, width / 2);
-        height = std::max(1u, height / 2);
-    }
-    input->close();
-    mipLevels_.swap(levels);
-    bytesRead_ += bytesRead;
+    const bool read = input->read_image(0, static_cast<int>(level), 0, spec.nchannels,
+                                        type, dest);
+    if (read) bytesRead_ += size;
+    const bool closed = input->close();
     totalReadTime_ += std::chrono::duration<double>(
         std::chrono::high_resolution_clock::now() - start).count();
-    return true;
+    return read && closed;
 }
 
 bool OIIOReader::readMipLevel(char* dest, unsigned int level, unsigned int expectedWidth,
@@ -145,11 +156,7 @@ bool OIIOReader::readMipLevel(char* dest, unsigned int level, unsigned int expec
     const unsigned int width = std::max(1u, info_.width >> level);
     const unsigned int height = std::max(1u, info_.height >> level);
     if (width != expectedWidth || height != expectedHeight) return false;
-    if (mipLevels_.empty() && !loadImage()) return false;
-    const size_t size = levelBytes(info_, width, height);
-    if (mipLevels_[level].size() != size) return false;
-    std::memcpy(dest, mipLevels_[level].data(), size);
-    return true;
+    return readMipLevelLocked(dest, level);
 }
 
 bool OIIOReader::readBaseColor(float4& dest) {
@@ -157,15 +164,14 @@ bool OIIOReader::readBaseColor(float4& dest) {
     if (!isOpen_ || std::max(1u, info_.width >> (info_.numMipLevels - 1)) != 1 ||
         std::max(1u, info_.height >> (info_.numMipLevels - 1)) != 1)
         return false;
-    if (mipLevels_.empty() && !loadImage()) return false;
-    TextureInfo levelInfo = info_;
-    levelInfo.width = levelInfo.height = 1;
-    const internal::ImageData pixel = internal::decodeImagePixels(mipLevels_.back().data(), levelInfo);
-    if (pixel.isFloat())
-        dest = make_float4(pixel.floats[0], pixel.floats[1], pixel.floats[2], pixel.floats[3]);
-    else
-        dest = make_float4(pixel.bytes[0] / 255.0f, pixel.bytes[1] / 255.0f,
-                          pixel.bytes[2] / 255.0f, pixel.bytes[3] / 255.0f);
+    alignas(float) std::array<unsigned char, 4 * sizeof(float)> pixel{};
+    if (!readMipLevelLocked(reinterpret_cast<char*>(pixel.data()), info_.numMipLevels - 1))
+        return false;
+    std::array<float, 4> color{{0.f, 0.f, 0.f, 1.f}};
+    for (unsigned int channel = 0; channel < info_.numChannels; ++channel)
+        color[channel] = internal::floatChannel(
+            pixel.data() + channel * getBytesPerChannel(info_.format), info_.format);
+    dest = make_float4(color[0], color[1], color[2], color[3]);
     return true;
 }
 

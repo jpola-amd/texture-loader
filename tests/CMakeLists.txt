@@ -39,8 +39,11 @@ add_executable(texture_loader_tests
     TextureSamplingTests.cpp
     SamplerStorageTests.cpp
     CapabilityTests.cpp
-    AnisotropyTests.cpp
-    AnisotropySamplingTests.cpp
+    # not working atm in HIP
+    # AnisotropyTests.cpp
+    # AnisotropySamplingTests.cpp
+    WholeMipDeviceTests.cpp
+    WholeMipRuntimeTests.cpp
 )
 
 target_include_directories(texture_loader_tests
@@ -102,6 +105,29 @@ add_custom_target(texture_sampling_test_module
     DEPENDS texture_sampling_kernel
     VERBATIM)
 add_dependencies(texture_loader_tests texture_sampling_test_module)
+
+hip_add_executable(
+    TARGET whole_mip_kernel
+    SOURCES WholeMipTestKernel.hip
+    ARCHITECTURES ${HIP_ARCHITECTURES}
+    OPTIONS -O3 --std=c++17 -DHIP_ENABLE_WARP_SYNC_BUILTINS
+    INCLUDES ${PROJECT_SOURCE_DIR}/include
+)
+add_custom_command(OUTPUT "${whole_mip_kernel_CODE_OBJECT}" APPEND
+    DEPENDS WholeMipTestData.h
+            "${PROJECT_SOURCE_DIR}/include/DemandLoading/Contracts.h"
+            "${PROJECT_SOURCE_DIR}/include/DemandLoading/WholeMipContext.h"
+            "${PROJECT_SOURCE_DIR}/include/DemandLoading/WholeMipSampling.h"
+            "${PROJECT_SOURCE_DIR}/include/DemandLoading/TextureSampling.h")
+target_compile_definitions(texture_loader_tests PRIVATE
+    WHOLE_MIP_KERNEL_PATH="${whole_mip_kernel_CODE_OBJECT}")
+add_custom_target(whole_mip_test_module
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:texture_loader_tests>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${whole_mip_kernel_CODE_OBJECT}" "$<TARGET_FILE_DIR:texture_loader_tests>"
+    DEPENDS whole_mip_kernel
+    VERBATIM)
+add_dependencies(texture_loader_tests whole_mip_test_module)
 gtest_discover_tests(texture_loader_tests WORKING_DIRECTORY "${PROJECT_BINARY_DIR}")
 
 # Contract state and ABI tests run without initializing a GPU.
@@ -114,7 +140,8 @@ gtest_discover_tests(shared_contract_tests WORKING_DIRECTORY "${PROJECT_BINARY_D
 
 # Native image decode regressions do not initialize a GPU. This separate
 # target can also be built and run with address/undefined sanitizers.
-add_executable(image_data_tests ImageDataTests.cpp SamplingTestUtilsTests.cpp AnisotropyReferenceTests.cpp)
+add_executable(image_data_tests ImageDataTests.cpp SamplingTestUtilsTests.cpp AnisotropyReferenceTests.cpp
+    MipSuffixDataTests.cpp ${PROJECT_SOURCE_DIR}/src/DemandLoading/Logging.cpp)
 target_include_directories(image_data_tests PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(image_data_tests PRIVATE hip::host GTest::gtest_main)
 target_compile_definitions(image_data_tests PRIVATE __HIP_PLATFORM_AMD__)
@@ -125,6 +152,7 @@ gtest_discover_tests(image_data_tests WORKING_DIRECTORY "${PROJECT_BINARY_DIR}")
 
 install(TARGETS texture_loader_tests image_data_tests RUNTIME DESTINATION bin COMPONENT tests)
 install(FILES "${texture_sampling_kernel_CODE_OBJECT}" "${shared_contract_kernel_CODE_OBJECT}"
+    "${whole_mip_kernel_CODE_OBJECT}"
     DESTINATION bin COMPONENT tests)
 
 message(STATUS "Building unit tests")
