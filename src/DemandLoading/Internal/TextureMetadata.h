@@ -61,6 +61,8 @@ struct TextureMetadata {
     capability_v1::MipPolicy policy = capability_v1::MipPolicy::LegacyCompatibility;
     anisotropy_v1::Request anisotropy = anisotropy_v1::Request::legacy();
     capability_v1::Status status{};
+    bool cubicEnabled = false;
+    TextureObject cubicPoints[32]{};
 
     TextureMetadata() = default;
     TextureMetadata(TextureMetadata&& other) noexcept { *this = std::move(other); }
@@ -78,6 +80,11 @@ struct TextureMetadata {
             policy = other.policy;
             anisotropy = other.anisotropy;
             status = other.status;
+            cubicEnabled = other.cubicEnabled;
+            for (unsigned m=0; m<32; ++m) {
+                cubicPoints[m] = other.cubicPoints[m];
+                other.cubicPoints[m] = 0;
+            }
         }
         return *this;
     }

@@ -300,6 +300,42 @@ hip_add_executable(
 
 ## Unit Tests
 
+The release-specific [handoff guide](HANDOFF.md) describes manifest verification,
+installed-header consumers, runtime dependency staging and relocation checks.
+Installed fixtures accept `HDT_TEST_FILE_ROOT` (absolute, test-owned); the default
+is `test-files` beside the executable. For packaged modules set
+`HIP_DEMAND_TEST_KERNEL_DIR` to package `bin`, and use `HDT_TEST_LOADER_LIBRARY`
+for an explicit ABI-test library path. None requires the old build directory.
+
+### Cubic and smart-bicubic v1
+
+See [CUBIC.md](CUBIC.md) for the additive host/device API, normalized-coordinate
+derivatives, frozen numerical bounds and strict demand contract. Enable cubic
+before residency. `image_data_tests` contains the GPU-independent double oracle
+and ABI tests; `texture_loader_tests` stages `cubic_kernel.co` using the same HIP
+module mechanism as the existing sampling tests.
+
+```powershell
+cmake --build build --config Release --target texture_loader_tests image_data_tests shared_contract_tests
+ctest --test-dir build -C Release -N -R "Cubic"
+ctest --test-dir build -C Release -R "Cubic" --output-on-failure
+```
+
+Do not exclude `CubicNativeOptOut` or `NativeDependentSmart` from the qualification
+run. They retain native anisotropy creation and native mip-filtering failures as
+failed tests, not successful skips. Pure cubic/override success and native
+qualification are separate results. Existing tests retaining known-native skips
+have not had their numerical thresholds changed.
+
+Native anisotropy defaults to an observable zero-submission override.
+`HDT_DISABLE_TEXTURE_ANISO_OVERRIDE=1` alone disables it; unset, `0`, empty or
+any other string retains the override. Requested sampler identity and effective
+mathematical cubic A are unchanged. Set the environment before loading and do
+not mutate it concurrently with loader operations. `RequireQualified` continues
+to reject unqualified native behavior. On Windows, set
+`HDT_TEST_MODULE_IDENTITY=1` to log actual loader/HIP/COMGR module paths; hash
+those files together with the printed cubic code-object path for runtime proof.
+
 The project includes a comprehensive test suite using Google Test.
 
 ### Building Tests

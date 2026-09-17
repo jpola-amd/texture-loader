@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "TestUtils.h"
 #include "ContractDeviceTestData.h"
+#include "TextureSamplingHarness.h"
 #include <DemandLoading/ContractState.h>
 #include <cstdlib>
 #include <iostream>
@@ -30,7 +31,11 @@ protected:
         ASSERT_EQ(hipDriverGetVersion(&driver), hipSuccess);
         std::cout << "Contract device=" << device << " " << properties.name << " "
                   << properties.gcnArchName << " runtime=" << runtime << " driver=" << driver << '\n';
-        ASSERT_EQ(hipModuleLoad(&module_, CONTRACT_KERNEL_PATH), hipSuccess);
+        const auto filename=std::filesystem::path(CONTRACT_KERNEL_PATH).filename();
+        const auto module=hip_demand::test::findSamplingModule(
+            {hip_demand::test::samplingModulePath().parent_path()/filename});
+        std::cout<<"Contract module="<<module.string()<<'\n';
+        ASSERT_EQ(hipModuleLoad(&module_, module.string().c_str()), hipSuccess);
         ASSERT_EQ(hipModuleGetFunction(&function_, module_, "evaluateContract"), hipSuccess);
         ASSERT_EQ(hipMalloc(&input_, sizeof(ContractDeviceCase)), hipSuccess);
         ASSERT_EQ(hipMalloc(&output_, sizeof(ContractDeviceResult)), hipSuccess);

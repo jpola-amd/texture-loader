@@ -7,6 +7,7 @@
 #include "DemandLoading/DeviceContext.h"
 #include "DemandLoading/Ticket.h"
 #include "DemandLoading/Contracts.h"
+#include "DemandLoading/CubicContext.h"
 #include <string>
 #include <memory>
 #include <vector>
@@ -252,8 +253,10 @@ public:
     contract_v1::Outcome getTextureStatusV1(uint32_t textureId, capability_v1::Status& status) const;
 
     // Immutable anisotropy request, independent of compatible image backing.
-    // Legacy APIs still submit zero. Explicit 1 disables anisotropy; 2..16
-    // permit native, unqualified sampling with observable degradation.
+    // Legacy APIs still request zero. Explicit 1 requests isotropic filtering;
+    // 2..16 request native, unqualified anisotropy. By default the shared native
+    // override submits zero for every request. Only the exact environment
+    // string HDT_DISABLE_TEXTURE_ANISO_OVERRIDE=1 disables it. See CUBIC.md.
     // Strict requests (including parity()) fail residency until the exact
     // configuration has pixel qualification. No configurations are certified
     // by this implementation; successful HIP calls/readback are not proof.
@@ -266,6 +269,12 @@ public:
     // Requested, submitted and returned fields are separate from qualification.
     // The nested snapshot retains resource, owner and primary/cleanup evidence.
     contract_v1::Outcome getTextureAnisotropyStatusV1(uint32_t textureId, anisotropy_v1::Status& status) const;
+
+    // Opt in before residency. Retains sampler identity and returns a tagged key
+    // (revision 1). Requires normalized coordinates and native linear spatial
+    // filtering. launchPrepare publishes the separate cubic snapshot.
+    contract_v1::RegistrationResult enableCubicV1(uint32_t textureId);
+    cubic_v1::DeviceContext getCubicContextV1() const;
 
     // Prepare for launch (updates device context). This implementation uses a
     // serialized, device-quiescent publication/retirement baseline; table copies

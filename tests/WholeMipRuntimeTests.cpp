@@ -363,7 +363,7 @@ INSTANTIATE_TEST_SUITE_P(InvalidSamplerFields, WholeMipInvalidSampler, testing::
 
 class WholeMipAnisotropyRejection : public WholeMipRuntime,
     public testing::WithParamInterface<std::tuple<uint32_t, bool>> {};
-TEST_P(WholeMipAnisotropyRejection, NonlegacyRatiosAreUnsupportedNotSilentLegacyAliases) {
+TEST_P(WholeMipAnisotropyRejection, QualificationRequiredOrDistinctUnqualifiedIdentity) {
     const auto base = runtimeDescriptor();
     wm::Texture texture(runtimeSource(), base, runtimeOptions());
     const auto legacy = texture.addSampler(base);
@@ -373,9 +373,17 @@ TEST_P(WholeMipAnisotropyRejection, NonlegacyRatiosAreUnsupportedNotSilentLegacy
     request.requirement = std::get<1>(GetParam()) ? aniso::Requirement::RequireQualified :
                                                    aniso::Requirement::AllowUnqualified;
     const auto result = texture.addSampler(base, cv::SamplingPolicy::Strict, request);
-    EXPECT_EQ(result.outcome, Outcome::Unsupported);
-    EXPECT_FALSE(cv::valid(result.key));
-    EXPECT_EQ(status(texture).numSamplers, 1u);
+    if (request.requirement == aniso::Requirement::RequireQualified) {
+        EXPECT_EQ(result.outcome, Outcome::Unsupported);
+        EXPECT_FALSE(cv::valid(result.key));
+        EXPECT_EQ(status(texture).numSamplers, 1u);
+    } else {
+        EXPECT_EQ(result.outcome, Outcome::Success);
+        EXPECT_TRUE(cv::valid(result.key));
+        EXPECT_FALSE(result.key == legacy.key);
+        EXPECT_EQ(status(texture).numSamplers, 2u);
+        EXPECT_TRUE(texture.addSampler(base,cv::SamplingPolicy::Strict,request).key == result.key);
+    }
     EXPECT_TRUE(texture.addSampler(base).key == legacy.key);
 }
 INSTANTIATE_TEST_SUITE_P(AllNonlegacyRatios, WholeMipAnisotropyRejection,

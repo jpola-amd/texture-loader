@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include <DemandLoading/Contracts.h>
 #include <gtest/gtest.h>
+#include "TestPaths.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -14,9 +15,9 @@ class SharedAbiExport : public testing::Test {
 protected:
     void SetUp() override {
 #ifdef _WIN32
-        library_ = LoadLibraryA(CONTRACT_LOADER_PATH);
+        library_ = LoadLibraryW(hip_demand::test::testLoaderLibraryPath().c_str());
 #else
-        library_ = dlopen(CONTRACT_LOADER_PATH, RTLD_NOW | RTLD_LOCAL);
+        library_ = dlopen(hip_demand::test::testLoaderLibraryPath().c_str(), RTLD_NOW | RTLD_LOCAL);
 #endif
         ASSERT_NE(library_, nullptr);
     }

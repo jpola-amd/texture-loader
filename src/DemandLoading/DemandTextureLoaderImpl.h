@@ -53,6 +53,8 @@ public:
         const anisotropy_v1::Request& request = anisotropy_v1::Request::legacy());
     contract_v1::Outcome getTextureStatusV1(uint32_t id, capability_v1::Status& status) const;
     contract_v1::Outcome getTextureAnisotropyStatusV1(uint32_t id, anisotropy_v1::Status& status) const;
+    contract_v1::RegistrationResult enableCubicV1(uint32_t id);
+    cubic_v1::DeviceContext getCubicContextV1() const;
     void launchPrepare(hipStream_t stream);
     DeviceContext getDeviceContext() const;
     size_t processRequests(hipStream_t stream, const DeviceContext& deviceContext);
@@ -138,6 +140,9 @@ private:
     // Device context with all device pointers
     DeviceContext deviceContext_{};
     internal::RequestStats* d_requestStats_ = nullptr;
+    std::vector<cubic_v1::Entry> cubicEntries_;
+    cubic_v1::Entry* d_cubicEntries_ = nullptr;
+    uint64_t cubicIncarnation_ = 0;
 
     hipStream_t requestCopyStream_ = nullptr;
 

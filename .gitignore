@@ -55,5 +55,8 @@ cmake_configure_*.cmd
 .DS_Store
 Thumbs.db
 
-install/
+install*/
+docs/
 dist/
+build-*/
+.github/

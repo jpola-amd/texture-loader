@@ -29,6 +29,7 @@ public:
                       const std::function<void()>& afterLaunch = {});
     hipError_t close();
     bool isClosed() const { return !module_ && !stream_ && !inputs_ && !outputs_; }
+    hipStream_t stream() const { return stream_; }
 
 private:
     hipModule_t module_ = nullptr;

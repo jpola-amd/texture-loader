@@ -44,6 +44,9 @@ add_executable(texture_loader_tests
     # AnisotropySamplingTests.cpp
     WholeMipDeviceTests.cpp
     WholeMipRuntimeTests.cpp
+    CubicSamplingTests.cpp
+    WindowsModuleIdentity.cpp
+    ImageRefreshTests.cpp
 )
 
 target_include_directories(texture_loader_tests
@@ -82,6 +85,11 @@ add_custom_command(OUTPUT "${shared_contract_kernel_CODE_OBJECT}" APPEND
             "${PROJECT_SOURCE_DIR}/include/DemandLoading/DeviceContext.h"
             "${PROJECT_SOURCE_DIR}/include/DemandLoading/TextureSampling.h")
 add_dependencies(texture_loader_tests shared_contract_kernel)
+add_custom_target(shared_contract_test_module
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${shared_contract_kernel_CODE_OBJECT}"
+        "$<TARGET_FILE_DIR:texture_loader_tests>"
+    DEPENDS shared_contract_kernel VERBATIM)
+add_dependencies(texture_loader_tests shared_contract_test_module)
 target_compile_definitions(texture_loader_tests PRIVATE
     CONTRACT_KERNEL_PATH="${shared_contract_kernel_CODE_OBJECT}")
 
@@ -130,18 +138,37 @@ add_custom_target(whole_mip_test_module
 add_dependencies(texture_loader_tests whole_mip_test_module)
 gtest_discover_tests(texture_loader_tests WORKING_DIRECTORY "${PROJECT_BINARY_DIR}")
 
+hip_add_executable(
+    TARGET cubic_kernel
+    SOURCES CubicTestKernel.hip
+    ARCHITECTURES ${HIP_ARCHITECTURES}
+    OPTIONS -O3 --std=c++17 -DHIP_ENABLE_WARP_SYNC_BUILTINS
+    INCLUDES ${PROJECT_SOURCE_DIR}/include
+)
+add_custom_command(OUTPUT "${cubic_kernel_CODE_OBJECT}" APPEND
+    DEPENDS CubicTestData.h
+        "${PROJECT_SOURCE_DIR}/include/DemandLoading/CubicContext.h"
+        "${PROJECT_SOURCE_DIR}/include/DemandLoading/CubicSampling.h"
+        "${PROJECT_SOURCE_DIR}/include/DemandLoading/WholeMipSampling.h")
+target_compile_definitions(texture_loader_tests PRIVATE CUBIC_KERNEL_PATH="${cubic_kernel_CODE_OBJECT}")
+add_custom_target(cubic_test_module
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${cubic_kernel_CODE_OBJECT}"
+        "$<TARGET_FILE_DIR:texture_loader_tests>"
+    DEPENDS cubic_kernel VERBATIM)
+add_dependencies(texture_loader_tests cubic_test_module)
+
 # Contract state and ABI tests run without initializing a GPU.
 add_executable(shared_contract_tests SharedContractTests.cpp SharedContractAbiTests.cpp)
 target_include_directories(shared_contract_tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
-target_compile_definitions(shared_contract_tests PRIVATE __HIP_PLATFORM_AMD__
-    CONTRACT_LOADER_PATH="$<TARGET_FILE:hip_demand_texture>")
+target_compile_definitions(shared_contract_tests PRIVATE __HIP_PLATFORM_AMD__)
 target_link_libraries(shared_contract_tests PRIVATE hip_demand_texture GTest::gtest_main ${CMAKE_DL_LIBS})
 gtest_discover_tests(shared_contract_tests WORKING_DIRECTORY "${PROJECT_BINARY_DIR}")
 
 # Native image decode regressions do not initialize a GPU. This separate
 # target can also be built and run with address/undefined sanitizers.
 add_executable(image_data_tests ImageDataTests.cpp SamplingTestUtilsTests.cpp AnisotropyReferenceTests.cpp
-    MipSuffixDataTests.cpp ${PROJECT_SOURCE_DIR}/src/DemandLoading/Logging.cpp)
+    MipSuffixDataTests.cpp CubicReferenceTests.cpp CubicContractTests.cpp ImageRefreshFixtureTests.cpp
+    ${PROJECT_SOURCE_DIR}/src/DemandLoading/Logging.cpp)
 target_include_directories(image_data_tests PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(image_data_tests PRIVATE hip::host GTest::gtest_main)
 target_compile_definitions(image_data_tests PRIVATE __HIP_PLATFORM_AMD__)
@@ -150,9 +177,19 @@ if(WIN32)
 endif()
 gtest_discover_tests(image_data_tests WORKING_DIRECTORY "${PROJECT_BINARY_DIR}")
 
-install(TARGETS texture_loader_tests image_data_tests RUNTIME DESTINATION bin COMPONENT tests)
+install(TARGETS texture_loader_tests image_data_tests shared_contract_tests RUNTIME DESTINATION bin COMPONENT tests)
+if(WIN32)
+    install(FILES "$<TARGET_FILE:GTest::gtest>" "$<TARGET_FILE:GTest::gtest_main>"
+        DESTINATION bin COMPONENT tests)
+endif()
 install(FILES "${texture_sampling_kernel_CODE_OBJECT}" "${shared_contract_kernel_CODE_OBJECT}"
     "${whole_mip_kernel_CODE_OBJECT}"
+    "${cubic_kernel_CODE_OBJECT}"
     DESTINATION bin COMPONENT tests)
+
+install(DIRECTORY handoff_consumer/ DESTINATION share/hip-demand-texture/consumer COMPONENT tests)
+install(DIRECTORY fixtures/handoff/ DESTINATION share/hip-demand-texture/fixtures COMPONENT tests)
+install(FILES CubicReference.h CubicExpected.h CubicSmartExpected.h CubicNativeReference.h
+    ImageRefreshFixtures.h DESTINATION share/hip-demand-texture/tests COMPONENT tests)
 
 message(STATUS "Building unit tests")

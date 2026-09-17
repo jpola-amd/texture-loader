@@ -3,8 +3,15 @@
 
 #include <hip/hip_runtime.h>
 #include <DemandLoading/DemandTextureLoader.h>
+#include <cstdlib>
+#include <cstring>
 
 namespace hip_demand { namespace internal {
+
+inline uint32_t nativeAnisotropy(uint32_t requested) {
+    const char* disable = std::getenv("HDT_DISABLE_TEXTURE_ANISO_OVERRIDE");
+    return disable && std::strcmp(disable, "1") == 0 ? requested : 0;
+}
 
 inline bool validAnisotropy(const anisotropy_v1::Request& request) {
     namespace aniso = anisotropy_v1;
@@ -51,7 +58,7 @@ inline hipTextureDesc makeSampler(const TextureDesc& desc, bool floatPixels, boo
     sampler.readMode = floatPixels ? hipReadModeElementType : hipReadModeNormalizedFloat;
     sampler.normalizedCoords = desc.normalizedCoords ? 1 : 0;
     sampler.sRGB = desc.sRGB && !floatPixels ? 1 : 0;
-    sampler.maxAnisotropy = maxAnisotropy;
+    sampler.maxAnisotropy = nativeAnisotropy(maxAnisotropy);
     if (mipmapped) {
         sampler.mipmapFilterMode = desc.mipmapFilterMode;
         sampler.maxMipmapLevelClamp = static_cast<float>(levels - 1);

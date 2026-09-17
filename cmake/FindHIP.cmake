@@ -125,6 +125,12 @@ if(WIN32)
         REQUIRED
     )
     set(HIP_RUNTIME_DLLS "${HIP_RUNTIME_DLL}" "${HIP_COMGR_RUNTIME_DLL}")
+    # Newer SDKs import this support library from the HIP runtime itself.
+    find_file(HIP_KPACK_RUNTIME_DLL NAMES rocm_kpack.dll
+        PATHS "${HIP_BIN_DIR}" NO_DEFAULT_PATH)
+    if(HIP_KPACK_RUNTIME_DLL)
+        list(APPEND HIP_RUNTIME_DLLS "${HIP_KPACK_RUNTIME_DLL}")
+    endif()
 endif()
 
 # Create interface targets

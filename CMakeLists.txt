@@ -153,4 +153,12 @@ install(DIRECTORY include/
 
 if(WIN32)
     install(FILES ${HIP_RUNTIME_DLLS} DESTINATION bin)
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+    include(InstallRequiredSystemLibraries)
+    install(PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} DESTINATION bin)
 endif()
+
+install(FILES CUBIC.md IMAGE_REFRESH.md HANDOFF.md
+    DESTINATION share/hip-demand-texture)
+install(FILES cmake/FindHIP.cmake DESTINATION share/hip-demand-texture/cmake)
+install(PROGRAMS tools/package_handoff.py DESTINATION share/hip-demand-texture)

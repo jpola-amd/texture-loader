@@ -7,6 +7,7 @@
 #include "Internal/MipSuffixData.h"
 #include "Internal/TextureMetadata.h"
 #include "Internal/TextureRuntime.h"
+#include "Internal/CubicRuntime.h"
 
 #include <algorithm>
 #include <atomic>
@@ -23,8 +24,8 @@ namespace {
 cv::SamplerDesc contractDescriptor(const TextureDesc& desc, cv::SamplingPolicy sampling,
                                   cap::MipPolicy policy) {
     cv::SamplerDesc result;
-    result.addressMode[0] = static_cast<cv::AddressMode>(desc.addressMode[0]);
-    result.addressMode[1] = static_cast<cv::AddressMode>(desc.addressMode[1]);
+    result.addressMode[0] = internal::cubicAddress(desc.addressMode[0]);
+    result.addressMode[1] = internal::cubicAddress(desc.addressMode[1]);
     result.spatialFilter = desc.filterMode == hipFilterModePoint ? cv::FilterMode::Point : cv::FilterMode::Linear;
     result.mipFilter = desc.mipmapFilterMode == hipFilterModePoint ? cv::FilterMode::Point : cv::FilterMode::Linear;
     result.normalizedCoords = desc.normalizedCoords;
@@ -47,10 +48,12 @@ public:
         internal::ImageStorage storage;
         cv::MipLayout mips;
         std::vector<hipTextureObject_t> samplers;
+        std::vector<cubic_v1::Entry> cubic;
+        std::vector<hipTextureDesc> submitted, returned;
         hipTextureDesc submittedSampler{}, returnedSampler{};
         cv::ResourceLifecycle lifetime;
         Backing(cv::BudgetLedger& ledger, cv::GpuKey key, size_t count)
-            : samplers(count, 0), lifetime(ledger, key, 1) {}
+            : samplers(count, 0), cubic(count), submitted(count), returned(count), lifetime(ledger, key, 1) {}
     };
 
     struct CandidateOwner {
@@ -126,6 +129,9 @@ public:
             return failInitialization(outcome);
         entries_.resize(options_.maxSamplers);
         descriptors_.reserve(options_.maxSamplers);
+        anisotropy_.reserve(options_.maxSamplers);
+        anisoStatus_.reserve(options_.maxSamplers);
+        cubicEnabled_.resize(options_.maxSamplers,false);
         requests_.resize(options_.maxRequests);
         hipError_t error = calls_.call(HipOperation::GetDevice, [&] { return hipGetDevice(&device_); });
         if (error != hipSuccess)
@@ -185,15 +191,16 @@ public:
             anisotropy.abi.byteSize != sizeof(anisotropy))
             return reject(Outcome::AbiMismatch);
         if (!internal::validAnisotropy(anisotropy)) return reject(Outcome::InvalidInput);
-        if (!(anisotropy == anisotropy_v1::Request::legacy()))
+        if (anisotropy.requirement == anisotropy_v1::Requirement::RequireQualified)
             return reject(Outcome::Unsupported);
         if (desc.sRGB != storageDesc_.sRGB || desc.generateMipmaps != storageDesc_.generateMipmaps ||
             desc.maxMipLevel != storageDesc_.maxMipLevel ||
             (!desc.normalizedCoords && baseLayout_.originalLevels != 1))
             return reject(Outcome::Unsupported);
-        const auto deviceDesc = contractDescriptor(desc, sampling, options_.mipPolicy);
+        auto deviceDesc = contractDescriptor(desc, sampling, options_.mipPolicy);
+        deviceDesc.maxAnisotropy = anisotropy.maxAnisotropy ? anisotropy.maxAnisotropy : 1;
         for (size_t id = 0; id < descriptors_.size(); ++id) {
-            if (descriptors_[id] == desc && entries_[id].descriptor == deviceDesc) {
+            if (descriptors_[id] == desc && entries_[id].descriptor == deviceDesc && anisotropy_[id] == anisotropy) {
                 finish(Outcome::Success);
                 return {entries_[id].texture.key, Outcome::Success};
             }
@@ -202,6 +209,8 @@ public:
         if (descriptors_.size() == options_.maxSamplers) return reject(Outcome::CapacityExhausted);
         const uint32_t id = static_cast<uint32_t>(descriptors_.size());
         descriptors_.push_back(desc);
+        anisotropy_.push_back(anisotropy);
+        anisoStatus_.emplace_back();
         Entry entry;
         entry.texture.key = {id, 1, incarnation_};
         entry.texture.revision = 1;
@@ -211,6 +220,77 @@ public:
         entries_[id] = entry;
         finish(Outcome::Success);
         return {entry.texture.key, Outcome::Success};
+    }
+
+    Outcome enableCubicV1(cv::GpuKey key) {
+        std::lock_guard<std::mutex> operation(operationMutex_);
+        if (key.slot >= descriptors_.size() || !(entries_[key.slot].texture.key == key))
+            return Outcome::InvalidKey;
+        if (current_ || retired_ || launchActive_) return Outcome::InvalidTransition;
+        if (!descriptors_[key.slot].normalizedCoords || descriptors_[key.slot].filterMode != hipFilterModeLinear)
+            return Outcome::Unsupported;
+        auto outcome = usable();
+        if (outcome != Outcome::Success) return outcome;
+        if (cubicEntries_.empty()) {
+            try { cubicEntries_.resize(options_.maxSamplers); }
+            catch (const std::bad_alloc&) { return Outcome::HostOutOfMemory; }
+            outcome = ledger_.reserve(cv::Charge::Overhead,2*cubicTableBytes());
+            if (outcome != Outcome::Success) { cubicEntries_.clear(); return outcome; }
+        }
+        for (auto& table : cubicTables_) {
+            if (table) continue;
+            const auto error = calls_.call(HipOperation::DeviceAllocation, [&] {
+                return hipMalloc(&table,cubicTableBytes());
+            });
+            if (error != hipSuccess) return hipResult(cap::Operation::Publish,error);
+        }
+        cubicEnabled_[key.slot] = true;
+        return Outcome::Success;
+    }
+
+    Outcome prepareCubicV1(hipStream_t stream, cubic_v1::DeviceContext& context) {
+        if (context.abi.version != cubic_v1::Version || context.abi.byteSize != sizeof(context))
+            return Outcome::AbiMismatch;
+        if (!cubicTables_[0] || !cubicTables_[1]) return Outcome::InvalidTransition;
+        DeviceContext whole;
+        const auto outcome = prepare(stream,whole);
+        if (outcome != Outcome::Success) return outcome;
+        context = {};
+        context.backing = cubic_v1::Backing::WholeMip;
+        context.whole = whole;
+        context.incarnation = incarnation_;
+        context.entries = cubicTables_[activeTable_];
+        context.count = static_cast<uint32_t>(descriptors_.size());
+        return Outcome::Success;
+    }
+
+    Outcome getAnisotropyStatusV1(cv::GpuKey key, anisotropy_v1::Status& result) const {
+        if (result.abi.version != anisotropy_v1::Version || result.abi.byteSize != sizeof(result))
+            return Outcome::AbiMismatch;
+        std::lock_guard<std::mutex> operation(operationMutex_);
+        if (key.slot >= descriptors_.size() || !(entries_[key.slot].texture.key == key))
+            return Outcome::InvalidKey;
+        result = {};
+        result.requested = anisotropy_[key.slot];
+        {
+            std::lock_guard<std::mutex> lock(statusMutex_);
+            result.texture = status_.device;
+        }
+        result.texture.textureId = key.slot;
+        result.texture.requested = descriptors_[key.slot];
+        result.texture.submittedSampler = current_ ? current_->submitted[key.slot] :
+            anisoStatus_[key.slot].submittedSampler;
+        result.texture.returnedSampler = current_ ? current_->returned[key.slot] :
+            anisoStatus_[key.slot].returnedSampler;
+        result.texture.submitted = current_ ? 1 : anisoStatus_[key.slot].submitted;
+        result.texture.returned = current_ ? 1 : anisoStatus_[key.slot].returned;
+        result.limitations = anisotropy_v1::UnqualifiedBehavior;
+        if (!result.requested.maxAnisotropy) result.limitations |= anisotropy_v1::LegacySetting;
+        if (result.texture.returned &&
+            result.texture.returnedSampler.maxAnisotropy != result.requested.maxAnisotropy)
+            result.limitations |= anisotropy_v1::DescriptorMismatch;
+        result.samplerSupport = current_ ? cap::Support::OperationSupported : cap::Support::Unknown;
+        return Outcome::Success;
     }
 
     Outcome resize(uint32_t first) {
@@ -357,10 +437,13 @@ public:
         for (int attempt = 0; attempt < 2; ++attempt) {
             freeDevice(tables_[0]);
             freeDevice(tables_[1]);
+            freeDevice(cubicTables_[0]);
+            freeDevice(cubicTables_[1]);
             freeDevice(deviceRequests_);
             freeDevice(deviceStats_);
         }
-        const bool allFreed = !tables_[0] && !tables_[1] && !deviceRequests_ && !deviceStats_;
+        const bool allFreed = !tables_[0] && !tables_[1] && !cubicTables_[0] && !cubicTables_[1] &&
+            !deviceRequests_ && !deviceStats_;
         if (allFreed && ledger_.charged(cv::Charge::Overhead))
             check(ledger_.release(cv::Charge::Overhead, ledger_.charged(cv::Charge::Overhead)));
         refresh();
@@ -368,6 +451,7 @@ public:
 
 private:
     size_t tableBytes() const { return options_.maxSamplers * sizeof(Entry); }
+    size_t cubicTableBytes() const { return options_.maxSamplers * sizeof(cubic_v1::Entry); }
     size_t requestBytes() const { return options_.maxRequests * sizeof(cv::RequestKey); }
 
     Outcome readRequestStats() {
@@ -468,6 +552,7 @@ private:
         device.submitted = device.returned = current_ ? 1 : 0;
         device.submittedSampler = current_ ? current_->submittedSampler : hipTextureDesc{};
         device.returnedSampler = current_ ? current_->returnedSampler : hipTextureDesc{};
+        status_.submittedMaxAnisotropy = device.submittedSampler.maxAnisotropy;
         device.capability = current_ ? cap::Support::OperationSupported : cap::Support::Unknown;
         device.primary = status_.primary;
         device.cleanup = status_.cleanup;
@@ -483,9 +568,23 @@ private:
             texture.textureObject = backing ? reinterpret_cast<uint64_t>(backing->samplers[id]) : 0;
             texture.residency = backing ? Outcome::Success : empty;
         }
-        const auto error = calls_.call(HipOperation::PublishMappings, [&] {
+        auto error = calls_.call(HipOperation::PublishMappings, [&] {
             return hipMemcpy(tables_[1 - activeTable_], entries_.data(), tableBytes(), hipMemcpyHostToDevice);
         });
+        if (error == hipSuccess && cubicTables_[0] && cubicTables_[1]) {
+            for (size_t id=0; id<descriptors_.size(); ++id) {
+                auto& entry = cubicEntries_[id];
+                entry = {};
+                if (!cubicEnabled_[id]) continue;
+                if (backing) entry = backing->cubic[id];
+                entry.texture = entries_[id].texture;
+                entry.descriptor = entries_[id].descriptor;
+            }
+            error = calls_.call(HipOperation::PublishMappings, [&] {
+                return hipMemcpy(cubicTables_[1-activeTable_],cubicEntries_.data(),
+                    cubicTableBytes(),hipMemcpyHostToDevice);
+            });
+        }
         if (error != hipSuccess) return cleanup ? cleanupError(cap::Operation::Publish, error) :
                                                  hipResult(cap::Operation::Publish, error);
         if (activate) activeTable_ = 1 - activeTable_;
@@ -513,6 +612,10 @@ private:
         auto& backing = *retired_;
         auto outcome = backing.lifetime.canDestroy();
         if (outcome != Outcome::Success) return outcome;
+        for (auto& entry : backing.cubic) {
+            const auto error = internal::destroyCubicPoints(calls_,entry.points);
+            if (error != hipSuccess) return cleanupError(cap::Operation::DestroySampler,error);
+        }
         for (auto& sampler : backing.samplers) {
             if (!sampler) continue;
             const auto error = calls_.call(HipOperation::DestroySampler, [&] { return hipDestroyTextureObject(sampler); });
@@ -703,7 +806,11 @@ private:
         }
         for (size_t id = 0; id < descriptors_.size(); ++id) {
             const auto sampler = internal::makeSampler(descriptors_[id], floating,
-                storage.mipmapArray != nullptr, candidate->mips.resourceLevels, 0);
+                storage.mipmapArray != nullptr, candidate->mips.resourceLevels, anisotropy_[id].maxAnisotropy);
+            candidate->submitted[id] = sampler;
+            anisoStatus_[id].submittedSampler = sampler;
+            anisoStatus_[id].submitted = 1;
+            anisoStatus_[id].returned = 0;
             error = calls_.call(HipOperation::CreateSampler, [&] {
                 return hipCreateTextureObject(&candidate->samplers[id], &resource, &sampler, nullptr);
             });
@@ -714,12 +821,21 @@ private:
             });
             if (error != hipSuccess) return rollback(hipResult(cap::Operation::ReadSampler, error));
             calls_.observeSampler(returned);
-            if (returned.maxAnisotropy != 0) {
+            candidate->returned[id] = returned;
+            anisoStatus_[id].returnedSampler = returned;
+            anisoStatus_[id].returned = 1;
+            if (returned.maxAnisotropy != sampler.maxAnisotropy) {
                 {
                     std::lock_guard<std::mutex> lock(statusMutex_);
                     status_.primary = {Outcome::Unsupported, cap::Operation::ReadSampler, 0};
                 }
                 return rollback(Outcome::Unsupported);
+            }
+            if (cubicEnabled_[id]) {
+                candidate->cubic[id].pointSRGB = descriptors_[id].sRGB && !floating;
+                error = internal::createCubicPoints(calls_,storage.array,storage.mipmapArray,
+                    candidate->mips.resourceLevels,descriptors_[id],floating,candidate->cubic[id].points);
+                if (error != hipSuccess) return rollback(hipResult(cap::Operation::CreateSampler,error));
             }
             if (id == 0) {
                 candidate->submittedSampler = sampler;
@@ -766,6 +882,11 @@ private:
     cv::MipLayout baseLayout_{};
     std::vector<Entry> entries_;
     std::vector<TextureDesc> descriptors_;
+    std::vector<anisotropy_v1::Request> anisotropy_;
+    std::vector<cap::Status> anisoStatus_;
+    std::vector<bool> cubicEnabled_;
+    std::vector<cubic_v1::Entry> cubicEntries_;
+    cubic_v1::Entry* cubicTables_[2]{};
     std::vector<cv::RequestKey> requests_;
     Entry* tables_[2]{};
     unsigned int activeTable_ = 0;
@@ -782,7 +903,7 @@ private:
     bool launchActive_ = false;
     Outcome emptyOutcome_ = Outcome::Pending;
     std::atomic<bool> cancelled_{false};
-    std::mutex operationMutex_;
+    mutable std::mutex operationMutex_;
     mutable std::mutex statusMutex_;
     Status status_{};
 };
@@ -807,5 +928,12 @@ Outcome Texture::processRequests() { return impl_->processRequests(); }
 Outcome Texture::cancel() { return impl_->cancel(); }
 Outcome Texture::collectRetired() { return impl_->collectRetired(); }
 Outcome Texture::getStatus(Status& status) const { return impl_->getStatus(status); }
+Outcome Texture::enableCubicV1(cv::GpuKey key) { return impl_->enableCubicV1(key); }
+Outcome Texture::prepareCubicV1(hipStream_t stream, cubic_v1::DeviceContext& context) {
+    return impl_->prepareCubicV1(stream,context);
+}
+Outcome Texture::getAnisotropyStatusV1(cv::GpuKey key, anisotropy_v1::Status& status) const {
+    return impl_->getAnisotropyStatusV1(key,status);
+}
 
 } }

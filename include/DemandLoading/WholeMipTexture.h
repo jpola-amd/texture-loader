@@ -31,8 +31,8 @@ struct Status {
     uint64_t sourceBytes = 0, uploadedBytes = 0;
     uint64_t authoredReads = 0, generatedLevels = 0, replacements = 0;
     uint32_t requestCount = 0, requestOverflow = 0, rejectedRequests = 0;
-    // Native sampler zero is an explicitly identified legacy setting, not
-    // qualification of anisotropy=1 or of native linear mip interpolation.
+    // Actual sampler submission for variant zero, after the shared override.
+    // This is not qualification of anisotropy or native mip interpolation.
     uint32_t submittedMaxAnisotropy = 0;
     capability_v1::Status device{};
 };
@@ -54,6 +54,11 @@ public:
     contract_v1::RegistrationResult addSampler(const TextureDesc& descriptor,
         contract_v1::SamplingPolicy sampling = contract_v1::SamplingPolicy::Strict,
         const anisotropy_v1::Request& anisotropy = anisotropy_v1::Request::legacy());
+
+    // Enable before loading; point views share this sampler's backing lifetime.
+    contract_v1::Outcome enableCubicV1(contract_v1::GpuKey key);
+    contract_v1::Outcome prepareCubicV1(hipStream_t stream, cubic_v1::DeviceContext& context);
+    contract_v1::Outcome getAnisotropyStatusV1(contract_v1::GpuKey key, anisotropy_v1::Status& status) const;
 
     // Ends at the policy-limited last original mip. Zero retains the full-chain
     // small-texture path; a one-level suffix uses an ordinary array.

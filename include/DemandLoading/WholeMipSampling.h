@@ -12,6 +12,14 @@ __device__ __forceinline__ bool finite(float value) {
     return value >= -3.402823466e+38F && value <= 3.402823466e+38F;
 }
 
+__device__ inline contract_v1::LevelRequirement nativeLevels(float lod, uint32_t levels,
+    contract_v1::FilterMode mode, uint32_t anisotropy) {
+    auto required = contract_v1::requiredLevels(lod,levels,mode,1);
+    if (required.outcome == contract_v1::Outcome::Success && anisotropy > 1)
+        required.levels = {0,levels-1};
+    return required;
+}
+
 __device__ inline contract_v1::Outcome lookup(
     const DeviceContext& context, contract_v1::GpuKey key, uint64_t revision, const Entry*& entry) {
     using namespace contract_v1;
@@ -39,8 +47,6 @@ __device__ inline contract_v1::Outcome lookup(
     if (texture.residency != Outcome::Success && texture.residency != Outcome::Pending &&
         texture.residency != Outcome::Deferred)
         return texture.residency;
-    if (candidate.descriptor.maxAnisotropy != 1)
-        return Outcome::Unsupported;
     uint32_t levels = candidate.descriptor.mipPolicy == MipPolicy::Disabled
         ? 1 : fullMipCount(texture.mips.originalWidth, texture.mips.originalHeight);
     if (candidate.descriptor.maxMipLevels && candidate.descriptor.maxMipLevels < levels)
@@ -151,7 +157,7 @@ __device__ inline contract_v1::SampleDecision tex2DLod(
     if (!detail::finite(u) || !detail::finite(v))
         return {Outcome::InvalidInput};
     SampleDecision decision = evaluate(entry->texture.mips,
-        requiredLevels(originalLod, entry->texture.mips.originalLevels, entry->descriptor.mipFilter,
+        detail::nativeLevels(originalLod, entry->texture.mips.originalLevels, entry->descriptor.mipFilter,
                        entry->descriptor.maxAnisotropy), entry->descriptor.samplingPolicy);
     detail::demand(context, key, revision, decision);
     if (decision.validity == SampleValidity::Complete || decision.validity == SampleValidity::CoarsePreview)
@@ -193,7 +199,7 @@ __device__ inline contract_v1::SampleDecision tex2DGrad(
         }
     }
     SampleDecision decision = evaluate(mips,
-        requiredLevels(lod, mips.originalLevels, entry->descriptor.mipFilter,
+        detail::nativeLevels(lod, mips.originalLevels, entry->descriptor.mipFilter,
                        entry->descriptor.maxAnisotropy), entry->descriptor.samplingPolicy);
     detail::demand(context, key, revision, decision);
     if (decision.validity == SampleValidity::Complete || decision.validity == SampleValidity::CoarsePreview) {

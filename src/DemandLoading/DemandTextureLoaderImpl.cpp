@@ -7,6 +7,8 @@
 #include "Internal/Utils.h"
 #include "Internal/ImageData.h"
 #include "Internal/TextureRuntime.h"
+#include "Internal/CubicRuntime.h"
+#include <DemandLoading/ContractState.h>
 
 #include <DemandLoading/Logging.h>
 #include <DemandLoading/Ticket.h>
@@ -276,6 +278,42 @@ DemandTextureLoader::Impl::~Impl() {
     if (deviceContext_.textures) HIP_CHECK(hipFree(deviceContext_.textures));
     if (deviceContext_.requests) HIP_CHECK(hipFree(deviceContext_.requests));
     if (d_requestStats_) HIP_CHECK(hipFree(d_requestStats_));
+    if (d_cubicEntries_) HIP_CHECK(hipFree(d_cubicEntries_));
+}
+
+contract_v1::RegistrationResult DemandTextureLoader::Impl::enableCubicV1(uint32_t id) {
+    std::lock_guard<std::mutex> operation(operationMutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (aborted_ || destroying_) return {{}, Outcome::Cancelled};
+    if (id >= nextTextureId_) return {{}, Outcome::InvalidKey};
+    auto& info = textures_[id];
+    if (!info.desc.normalizedCoords || info.desc.filterMode != hipFilterModeLinear)
+        return {{}, Outcome::Unsupported};
+    if (info.resident || info.texObj) return {{}, Outcome::InvalidTransition};
+    if (!d_cubicEntries_) {
+        if (!selectDevice()) return {{}, Outcome::RuntimeFailure};
+        auto result = contract_v1::allocateLoaderIncarnation(cubicIncarnation_);
+        if (result != Outcome::Success) return {{}, result};
+        try { cubicEntries_.resize(options_.maxTextures); }
+        catch (const std::bad_alloc&) { return {{}, Outcome::HostOutOfMemory}; }
+        auto error = hipCalls_.call(HipOperation::DeviceAllocation, [&] {
+            return hipMalloc(&d_cubicEntries_, cubicEntries_.size()*sizeof(cubic_v1::Entry));
+        });
+        if (error != hipSuccess) return {{}, hipFailure(cap::Operation::Publish,error).outcome};
+    }
+    info.cubicEnabled = true;
+    markTextureDirtyLocked(id);
+    return {{id,1,cubicIncarnation_}, Outcome::Success};
+}
+
+cubic_v1::DeviceContext DemandTextureLoader::Impl::getCubicContextV1() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cubic_v1::DeviceContext result;
+    result.incarnation = cubicIncarnation_;
+    result.entries = d_cubicEntries_;
+    result.count = nextTextureId_;
+    result.legacy = deviceContext_;
+    return result;
 }
 
 // AsyncGuard destructor
@@ -1001,15 +1039,16 @@ DemandTextureLoader::Impl::Probe& DemandTextureLoader::Impl::probeMipmaps(const 
     key.generateMipmaps = true;
     key.maxMipLevel = 0;
     key.evictionPriority = EvictionPriority::Normal;
+    const uint32_t nativeAnisotropy = internal::nativeAnisotropy(maxAnisotropy);
     auto found = std::find_if(probes_.begin(), probes_.end(), [&](const Probe& probe) {
-        return probe.floatPixels == floatPixels && probe.desc == key && probe.maxAnisotropy == maxAnisotropy;
+        return probe.floatPixels == floatPixels && probe.desc == key && probe.maxAnisotropy == nativeAnisotropy;
     });
     if (found == probes_.end()) {
         probes_.emplace_back();
         found = std::prev(probes_.end());
         found->desc = key;
         found->floatPixels = floatPixels;
-        found->maxAnisotropy = maxAnisotropy;
+        found->maxAnisotropy = nativeAnisotropy;
     }
     auto& probe = *found;
     if (!cleanupProbe(probe))
@@ -1181,6 +1220,11 @@ DemandTextureLoader::Impl::LoadOutcome DemandTextureLoader::Impl::loadTexture(co
     info.status.returnedSampler = returned;
     info.status.returned = error == hipSuccess ? 1 : 0;
     info.status.capability = storage.hasMipmaps ? cap::Support::OperationSupported : support;
+    if (error == hipSuccess && info.cubicEnabled) {
+        operation = cap::Operation::CreateSampler;
+        error = internal::createCubicPoints(hipCalls_, storage.array, storage.mipmapArray,
+            storage.numMipLevels, desc, storage.floatPixels, info.cubicPoints);
+    }
     refreshStorageStatusLocked(storage);
     if (error != hipSuccess) {
         info.primaryHipError = error;
@@ -1651,6 +1695,45 @@ bool DemandTextureLoader::Impl::publishMappingsLocked(bool retiring) {
     }
     if (error == hipSuccess)
         error = textures();
+    if (error == hipSuccess && d_cubicEntries_) {
+        for (uint32_t id=0; id<nextTextureId_; ++id) {
+            auto& entry = cubicEntries_[id];
+            const auto& info = textures_[id];
+            entry = {};
+            if (!info.cubicEnabled) continue;
+            entry.texture.key = {id,1,cubicIncarnation_};
+            entry.texture.revision = 1;
+            entry.texture.state = contract_v1::RegistrationState::Live;
+            entry.descriptor = internal::cubicDescriptor(info.desc,info.anisotropy.maxAnisotropy);
+            entry.descriptor.mipPolicy = mipEnabled(info.desc,info.policy) ?
+                contract_v1::MipPolicy::Required : contract_v1::MipPolicy::Disabled;
+            entry.pointSRGB = info.desc.sRGB && !info.storage->floatPixels;
+            auto& m = entry.texture.mips;
+            m.originalWidth = info.storage->width;
+            m.originalHeight = info.storage->height;
+            m.originalLevels = desiredLevels(m.originalWidth,m.originalHeight,info.desc,info.policy);
+            if (info.resident && info.storage->numMipLevels == int(m.originalLevels)) {
+                entry.texture.residency = Outcome::Success;
+                entry.texture.textureObject = h_textures_[id];
+                m.firstResidentMip = 0;
+                m.resourceWidth = m.originalWidth;
+                m.resourceHeight = m.originalHeight;
+                m.resourceLevels = m.originalLevels;
+                std::copy(std::begin(info.cubicPoints),std::end(info.cubicPoints),std::begin(entry.points));
+            } else {
+                entry.texture.residency = info.resident ? Outcome::Unsupported :
+                    (info.status.state == cap::State::Failed ? info.status.primary.outcome : Outcome::Pending);
+                if (!info.storage->filename.empty() && !m.originalWidth && !m.originalHeight && !m.originalLevels &&
+                    (info.status.state == cap::State::Registered || info.status.state == cap::State::Pending ||
+                     info.status.state == cap::State::Unloaded))
+                    entry.texture.residency = Outcome::Deferred;
+            }
+        }
+        error = hipCalls_.call(operation, [&] {
+            return hipMemcpy(d_cubicEntries_,cubicEntries_.data(),
+                cubicEntries_.size()*sizeof(cubic_v1::Entry),hipMemcpyHostToDevice);
+        });
+    }
     if (error == hipSuccess)
         error = flags();
     if (error != hipSuccess) {
@@ -1681,6 +1764,12 @@ bool DemandTextureLoader::Impl::publishMappingsLocked(bool retiring) {
 }
 
 bool DemandTextureLoader::Impl::cleanupTextureResources(TextureMetadata& info) {
+    const auto pointError = internal::destroyCubicPoints(hipCalls_,info.cubicPoints);
+    if (pointError != hipSuccess) {
+        info.status.cleanup = hipFailure(cap::Operation::DestroySampler,pointError);
+        lastError_ = hipLoaderError(pointError);
+        return false;
+    }
     if (info.texObj) {
         const hipError_t err = hipCalls_.call(HipOperation::DestroySampler, [&] {
             return hipDestroyTextureObject(info.texObj);

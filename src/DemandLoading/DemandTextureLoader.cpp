@@ -92,6 +92,14 @@ void DemandTextureLoader::launchPrepare(hipStream_t stream) {
     impl_->launchPrepare(stream);
 }
 
+contract_v1::RegistrationResult DemandTextureLoader::enableCubicV1(uint32_t id) {
+    return impl_->enableCubicV1(id);
+}
+
+cubic_v1::DeviceContext DemandTextureLoader::getCubicContextV1() const {
+    return impl_->getCubicContextV1();
+}
+
 DeviceContext DemandTextureLoader::getDeviceContext() const {
     return impl_->getDeviceContext();
 }

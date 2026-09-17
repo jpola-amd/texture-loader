@@ -386,8 +386,8 @@ TEST_F(WholeMipRequests, TerminalAndMalformedEntriesDoNotGenerateDemand) {
     check([](auto& e) { e.texture.mips.originalLevels = 1; }, cv::Outcome::Unsupported);
     check([](auto& e) { e.descriptor.abi.version = 2; }, cv::Outcome::AbiMismatch);
     check([](auto& e) { e.descriptor.mipFilter = cv::FilterMode(99); }, cv::Outcome::InvalidInput);
-    check([](auto& e) { e.descriptor.maxAnisotropy = 2; }, cv::Outcome::Unsupported);
-    check([](auto& e) { e.descriptor.maxAnisotropy = 16; }, cv::Outcome::Unsupported);
+    check([](auto& e) { e.descriptor.maxAnisotropy = 0; }, cv::Outcome::InvalidInput);
+    check([](auto& e) { e.descriptor.maxAnisotropy = 17; }, cv::Outcome::InvalidInput);
 }
 
 TEST_F(WholeMipRequests, DirectRequestsAndNonfiniteSamplingInputsAreValidated) {
