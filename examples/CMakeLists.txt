@@ -264,6 +264,104 @@ install(FILES
 )
 
 if(USE_OIIO)
+
+    set(VMM_DEVICE_DEPS
+        ${PROJECT_SOURCE_DIR}/include/DemandLoading/DeviceContext.h
+        ${PROJECT_SOURCE_DIR}/include/DemandLoading/VmmDeviceUtils.h
+        ${PROJECT_SOURCE_DIR}/include/DemandLoading/VmmTextureSampling.h
+    )
+
+    hip_add_executable(
+        TARGET vmm_loader_vram_usage_kernel
+        SOURCES vmm_loader_vram_usage.hip
+        ARCHITECTURES ${HIP_ARCHITECTURES}
+        OPTIONS -O3 --std=c++17 -DHIP_ENABLE_WARP_SYNC_BUILTINS
+        INCLUDES ${PROJECT_SOURCE_DIR}/include
+        DEPENDS ${VMM_DEVICE_DEPS}
+    )
+
+    hip_add_executable(
+        TARGET vmm_loader_sampler_benchmark_kernel
+        SOURCES vmm_loader_sampler_benchmark.hip
+        ARCHITECTURES ${HIP_ARCHITECTURES}
+        OPTIONS -O3 --std=c++17 -DHIP_ENABLE_WARP_SYNC_BUILTINS
+        INCLUDES ${PROJECT_SOURCE_DIR}/include
+        DEPENDS ${VMM_DEVICE_DEPS}
+    )
+
+    add_executable(vmm_loader_vram_usage vmm_loader_vram_usage.cpp)
+    add_executable(vmm_loader_sampler_benchmark vmm_loader_sampler_benchmark.cpp)
+
+    target_include_directories(vmm_loader_vram_usage PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${STB_INCLUDE_DIR}
+    )
+    target_include_directories(vmm_loader_sampler_benchmark PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${STB_INCLUDE_DIR}
+    )
+
+    target_link_libraries(vmm_loader_vram_usage PRIVATE hip_demand_texture)
+    target_link_libraries(vmm_loader_sampler_benchmark PRIVATE hip_demand_texture)
+    target_compile_definitions(vmm_loader_vram_usage PRIVATE
+        __HIP_PLATFORM_AMD__
+        TEST_IMAGES_DIR="${PROJECT_SOURCE_DIR}/test_images"
+    )
+    target_compile_definitions(vmm_loader_sampler_benchmark PRIVATE
+        __HIP_PLATFORM_AMD__
+        TEST_IMAGES_DIR="${PROJECT_SOURCE_DIR}/test_images"
+    )
+
+    if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+        message(FATAL_ERROR "Bundled MemPulse binaries support only Windows x64")
+    endif()
+
+    set(MEMPULSE_ROOT "${PROJECT_SOURCE_DIR}/external/mempulse")
+    add_library(Mempulse::Mempulse SHARED IMPORTED)
+    set_target_properties(Mempulse::Mempulse PROPERTIES
+        IMPORTED_IMPLIB "${MEMPULSE_ROOT}/lib/x64/mempulse.lib"
+        IMPORTED_LOCATION "${MEMPULSE_ROOT}/bin/x64/mempulse.dll"
+        INTERFACE_INCLUDE_DIRECTORIES "${MEMPULSE_ROOT}/include"
+    )
+    target_link_libraries(vmm_loader_vram_usage PRIVATE Mempulse::Mempulse)
+    add_custom_command(TARGET vmm_loader_vram_usage POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:Mempulse::Mempulse>
+            $<TARGET_FILE_DIR:vmm_loader_vram_usage>
+        COMMENT "Copying MemPulse runtime library"
+        VERBATIM
+    )
+
+    add_custom_command(TARGET vmm_loader_vram_usage_kernel POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_PROPERTY:vmm_loader_vram_usage_kernel,HIP_CODE_OBJECT>
+            $<TARGET_FILE_DIR:vmm_loader_vram_usage>/vmm_loader_vram_usage_kernel.co
+        COMMENT "Copying VMM VRAM usage HIP kernel code object"
+        VERBATIM
+    )
+    add_custom_command(TARGET vmm_loader_sampler_benchmark_kernel POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_PROPERTY:vmm_loader_sampler_benchmark_kernel,HIP_CODE_OBJECT>
+            $<TARGET_FILE_DIR:vmm_loader_sampler_benchmark>/vmm_loader_sampler_benchmark_kernel.co
+        COMMENT "Copying VMM sampler benchmark HIP kernel code object"
+        VERBATIM
+    )
+    add_dependencies(vmm_loader_vram_usage vmm_loader_vram_usage_kernel)
+    add_dependencies(vmm_loader_sampler_benchmark vmm_loader_sampler_benchmark_kernel)
+
+    install(TARGETS vmm_loader_vram_usage vmm_loader_sampler_benchmark RUNTIME DESTINATION bin)
+    install(FILES "${MEMPULSE_ROOT}/bin/x64/mempulse.dll" DESTINATION bin)
+    install(FILES
+        $<TARGET_PROPERTY:vmm_loader_vram_usage_kernel,HIP_CODE_OBJECT>
+        DESTINATION bin
+        RENAME vmm_loader_vram_usage_kernel.co
+    )
+    install(FILES
+        $<TARGET_PROPERTY:vmm_loader_sampler_benchmark_kernel,HIP_CODE_OBJECT>
+        DESTINATION bin
+        RENAME vmm_loader_sampler_benchmark_kernel.co
+    )
+
     add_executable(oiio_formats_example oiio_formats.cpp)
     target_include_directories(oiio_formats_example PRIVATE ${PROJECT_SOURCE_DIR}/include)
     target_link_libraries(oiio_formats_example PRIVATE hip_demand_texture)

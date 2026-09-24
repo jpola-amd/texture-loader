@@ -68,6 +68,32 @@ public:
         bytesRead_ += data_.size();
         return true;
     }
+
+    bool readTile(char* dest, unsigned int mipLevel, const Tile& tile, hipStream_t stream) override {
+        (void)stream;
+        if (dest == nullptr || mipLevel != 0) return false;
+
+        const size_t firstX = static_cast<size_t>(tile.x) * tile.width;
+        const size_t firstY = static_cast<size_t>(tile.y) * tile.height;
+        if (firstX >= width_ || firstY >= height_) return false;
+
+        const size_t copyWidth = std::min(static_cast<size_t>(tile.width), width_ - firstX);
+        const size_t copyHeight = std::min(static_cast<size_t>(tile.height), height_ - firstY);
+        const size_t tileRowBytes = static_cast<size_t>(tile.width) * channels_;
+
+        if (copyWidth < tile.width || copyHeight < tile.height) {
+            std::memset(dest, 0, static_cast<size_t>(tile.height) * tileRowBytes);
+        }
+
+        for (size_t row = 0; row < copyHeight; ++row) {
+            const size_t sourceOffset = ((firstY + row) * width_ + firstX) * channels_;
+            const size_t destOffset = row * tileRowBytes;
+            std::memcpy(dest + destOffset, data_.data() + sourceOffset, copyWidth * channels_);
+        }
+
+        bytesRead_ += copyWidth * copyHeight * channels_;
+        return true;
+    }
     
     bool readBaseColor(float4& dest) override {
         dest = make_float4(0.5f, 0.5f, 0.5f, 1.0f);

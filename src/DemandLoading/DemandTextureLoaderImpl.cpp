@@ -28,7 +28,6 @@ namespace hip_demand {
 
 using internal::TextureMetadata;
 using internal::RequestStats;
-using internal::calculateMipLevels;
 
 // -----------------------------------------------------------------------------
 // Constructor / Destructor

@@ -41,14 +41,13 @@ cmake_configure_*.cmd
 *.so
 *.a
 *.lib
+!external/mempulse/**
 
 # IDE
 .vscode/
 .idea/
 
 # Generated images
-*.png
-*.jpg
 *.bmp
 
 # OS
