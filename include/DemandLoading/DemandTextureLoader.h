@@ -115,6 +115,15 @@ public:
     // Prepare for launch (updates device context)
     void launchPrepare(hipStream_t stream = 0);
 
+    /// OptiX Toolkit-style launchPrepare: uploads pending state on the stream and returns the
+    /// device context to pass to kernels. Returns false when the loader failed to initialize.
+    /// Upload errors are reported through getLastError(), as for launchPrepare(stream).
+    bool launchPrepare(hipStream_t stream, DeviceContext& context) {
+        launchPrepare(stream);
+        context = getDeviceContext();
+        return context.samplers != nullptr;
+    }
+
     // Get device context to pass to kernel
     DeviceContext getDeviceContext() const;
 
@@ -145,6 +154,10 @@ public:
     // Utility. Invalid/unregistered IDs set InvalidTextureId without mutation.
     void unloadTexture(uint32_t textureId);
     void unloadAll();
+
+    /// OptiX Toolkit-style name for unloadTexture(). Unlike the OptiX Toolkit, which defers the
+    /// unload to the next launchPrepare(), the texture is unloaded immediately.
+    void unloadTextureTiles(unsigned int textureId) { unloadTexture(textureId); }
 
     /// Abort all pending operations and halt the loader gracefully.
     /// After calling abort(), no new requests will be processed.

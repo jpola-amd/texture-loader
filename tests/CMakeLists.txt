@@ -73,7 +73,9 @@ add_custom_command(OUTPUT "${shared_contract_kernel_CODE_OBJECT}" APPEND
     DEPENDS ContractDeviceTestData.h
             "${PROJECT_SOURCE_DIR}/include/DemandLoading/Contracts.h"
             "${PROJECT_SOURCE_DIR}/include/DemandLoading/DeviceContext.h"
-            "${PROJECT_SOURCE_DIR}/include/DemandLoading/TextureSampling.h")
+            "${PROJECT_SOURCE_DIR}/include/DemandLoading/TextureSampler.h"
+            "${PROJECT_SOURCE_DIR}/include/DemandLoading/TextureSampling.h"
+            "${PROJECT_SOURCE_DIR}/include/ShaderUtil/TextureUtil.h")
 add_dependencies(texture_loader_tests shared_contract_kernel)
 target_compile_definitions(texture_loader_tests PRIVATE
     CONTRACT_KERNEL_PATH="${shared_contract_kernel_CODE_OBJECT}")
@@ -88,7 +90,9 @@ hip_add_executable(
 add_custom_command(OUTPUT "${texture_sampling_kernel_CODE_OBJECT}" APPEND
     DEPENDS TextureSamplingTestData.h
             "${PROJECT_SOURCE_DIR}/include/DemandLoading/DeviceContext.h"
-            "${PROJECT_SOURCE_DIR}/include/DemandLoading/TextureSampling.h")
+            "${PROJECT_SOURCE_DIR}/include/DemandLoading/TextureSampler.h"
+            "${PROJECT_SOURCE_DIR}/include/DemandLoading/TextureSampling.h"
+            "${PROJECT_SOURCE_DIR}/include/ShaderUtil/TextureUtil.h")
 target_compile_definitions(texture_loader_tests PRIVATE
     SAMPLING_KERNEL_PATH="${texture_sampling_kernel_CODE_OBJECT}")
 add_custom_target(texture_sampling_test_module

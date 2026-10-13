@@ -6,6 +6,7 @@
 ///       Must be compiled with HIP compiler (hipcc) for device code.
 
 #include "DemandLoading/DeviceContext.h"
+#include "ShaderUtil/TextureUtil.h"
 
 #if !defined(HIP_ENABLE_WARP_SYNC_BUILTINS)
 #warning "HIP_ENABLE_WARP_SYNC_BUILTINS is not defined; warp-sync builtins may be unavailable"
@@ -163,6 +164,75 @@ __device__ inline bool tex2DLod(const DeviceContext& ctx,
     
     result = ::tex2DLod<float4>((hipTextureObject_t)ctx.textures[texId], u, v, lod);
     return true;
+}
+
+//=============================================================================
+// OptiX Toolkit-style Entry Points
+//=============================================================================
+// These mirror the demandLoading:: device API used by OptiX Toolkit clients, so renderer code can
+// keep one call shape for both backends. Deliberate differences from the OptiX Toolkit:
+// - Only sampler pages (page < maxTextures) exist. Base-color pages are not published, so a
+//   page at or above maxTextures returns 0 with *valid == false and records no request.
+// - A resident sampler means the whole mip chain is resident (mipTailFirstLevel == 0).
+// - Filtering is the hardware sampler's; no software cubic or anisotropic filtering is applied.
+
+/// Return the sampler page for a texture, or record a request and return 0 when it is not resident.
+/// The returned value is the device address of a TextureSampler, as in demandLoading::pagingMapOrRequest.
+__device__ inline unsigned long long pagingMapOrRequest(const DeviceContext& ctx, unsigned int page, bool* valid) {
+    if (page >= ctx.maxTextures || !ctx.samplers) {
+        *valid = false;
+        return 0;
+    }
+    if (!isTextureResident(ctx, page)) {
+        recordTextureRequest(ctx, page);
+        *valid = false;
+        return 0;
+    }
+    *valid = true;
+    return reinterpret_cast<unsigned long long>(&ctx.samplers[page]);
+}
+
+namespace detail {
+__device__ __forceinline__ void convertType(const float4& in, float& out) { out = in.x; }
+__device__ __forceinline__ void convertType(const float4& in, float2& out) { out = make_float2(in.x, in.y); }
+__device__ __forceinline__ void convertType(const float4& in, float4& out) { out = in; }
+
+// OptiX Toolkit returns this value for a sample that is not resident.
+__device__ __forceinline__ float4 nonResidentColor() { return make_float4(1.0f, 0.0f, 1.0f, 0.0f); }
+}  // namespace detail
+
+/// Sample with explicit gradients. Sample is float, float2, or float4.
+/// Sets *isResident and records a request when the texture is not resident.
+template <class Sample>
+__device__ inline Sample tex2DGrad(const DeviceContext& ctx, unsigned int textureId, float x, float y,
+                                   float2 ddx, float2 ddy, bool* isResident) {
+    float4 value = detail::nonResidentColor();
+    *isResident = tex2DGrad(ctx, textureId, x, y, ddx, ddy, value, value);
+    Sample rval;
+    detail::convertType(value, rval);
+    return rval;
+}
+
+/// Sample at an explicit LOD. Sample is float, float2, or float4.
+template <class Sample>
+__device__ inline Sample tex2DLod(const DeviceContext& ctx, unsigned int textureId, float x, float y,
+                                  float lod, bool* isResident) {
+    float4 value = detail::nonResidentColor();
+    *isResident = tex2DLod(ctx, textureId, x, y, lod, value, value);
+    Sample rval;
+    detail::convertType(value, rval);
+    return rval;
+}
+
+/// Sample with implicit LOD. Sample is float, float2, or float4.
+template <class Sample>
+__device__ inline Sample tex2D(const DeviceContext& ctx, unsigned int textureId, float x, float y,
+                               bool* isResident) {
+    float4 value = detail::nonResidentColor();
+    *isResident = tex2D(ctx, textureId, x, y, value, value);
+    Sample rval;
+    detail::convertType(value, rval);
+    return rval;
 }
 
 } // namespace hip_demand

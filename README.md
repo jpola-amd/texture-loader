@@ -251,8 +251,10 @@ size_t loaded = loader.processRequests(stream);
 | `createTexture(filename, desc)` | Create texture from file |
 | `createTextureFromMemory(data, w, h, c, desc)` | Create from memory |
 | `launchPrepare(stream)` | Update device context before kernel |
+| `launchPrepare(stream, context)` | OptiX Toolkit-style form; returns the device context |
 | `getDeviceContext()` | Get context to pass to kernel |
 | `processRequests(stream)` | Load requested textures after kernel |
+| `unloadTexture(id)` / `unloadTextureTiles(id)` | Unload a texture immediately |
 | `getResidentTextureCount()` | Number of loaded textures |
 | `getTotalTextureMemory()` | GPU memory usage |
 | `hadRequestOverflow()` | Check if buffer overflowed |
@@ -295,6 +297,37 @@ __global__ void myKernel(hip_demand::DeviceContext ctx, uint32_t texId) {
     }
 }
 ```
+
+#### OptiX Toolkit-style device API
+
+`TextureSampling.h` also provides the call shapes of the OptiX Toolkit
+`demandLoading` device API, so renderer code can use one form for both backends:
+
+```cpp
+bool resident = false;
+float4 color = hip_demand::tex2DGrad<float4>(ctx, texId, u, v, ddx, ddy, &resident);
+
+const auto* sampler = reinterpret_cast<const hip_demand::TextureSampler*>(
+    hip_demand::pagingMapOrRequest(ctx, texId, &resident));
+float level = getMipLevel(ddx, ddy, sampler->width, sampler->height,
+                          1.0f / sampler->desc.maxAnisotropy);
+```
+
+- `tex2D`, `tex2DLod`, and `tex2DGrad` accept `float`, `float2`, or `float4` samples.
+  A sample that is not resident returns `(1, 0, 1, 0)`, as in the OptiX Toolkit.
+- `pagingMapOrRequest` returns the device address of the `TextureSampler` record,
+  or records a request and returns 0.
+- `getMipLevel` is in the global namespace in `ShaderUtil/TextureUtil.h`, as in the OptiX Toolkit.
+
+These deliberate differences apply:
+
+- The loader stores whole textures. A resident sampler has every mip level
+  resident, `mipTailFirstLevel` is 0, and `isSparseTexture` is 0.
+- The loader does not publish base-color pages. Pages at or above `maxTextures`
+  return 0 and do not record a request. There is no `getBaseColor`.
+- The hardware sampler has no anisotropy, so `desc.maxAnisotropy` is 1.
+  There is no software cubic filtering (`tex2DCubic`).
+- `unloadTextureTiles` unloads immediately. The OptiX Toolkit defers the unload to the next `launchPrepare`.
 
 ### Error Handling
 

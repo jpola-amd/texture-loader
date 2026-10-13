@@ -947,5 +947,136 @@ TEST_F(SamplingHarnessDeviceTest, InvalidBatchDoesNotMutateOutputAndFixtureRemai
     EXPECT_TRUE(harness.isClosed());
 }
 
+uint32_t readRequestCount(const DeviceContext& context) {
+    uint32_t requests = 0;
+    EXPECT_EQ(hipMemcpy(&requests, context.requestCount, sizeof(requests), hipMemcpyDeviceToHost), hipSuccess);
+    return requests;
+}
+
+TEST_F(TextureSamplingTest, OtkStyleEntryPointsMatchLegacySampling) {
+    auto source = std::make_shared<TypedImageSource>(makeAuthoredMipSource(false));
+    TextureDesc desc;
+    desc.filterMode = hipFilterModePoint;
+    desc.mipmapFilterMode = hipFilterModePoint;
+    desc.addressMode[0] = desc.addressMode[1] = hipAddressModeClamp;
+    TextureHandle handle;
+    hipTextureObject_t texture{};
+    ASSERT_NO_FATAL_FAILURE(requestAndLoad(source, desc, handle, texture));
+    DeviceContext context{};
+    ASSERT_TRUE(loader_->launchPrepare(nullptr, context));
+    ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
+
+    const std::vector<std::pair<SamplingPath, SamplingPath>> pairs{
+        {SamplingPath::Implicit, SamplingPath::OtkImplicit},
+        {SamplingPath::Lod, SamplingPath::OtkLod},
+        {SamplingPath::Gradient, SamplingPath::OtkGradient}};
+    for (const auto& [legacyPath, otkPath] : pairs) {
+        for (unsigned int level = 0; level < source->info.numMipLevels; ++level) {
+            SCOPED_TRACE(::testing::Message() << "path=" << static_cast<int>(otkPath) << " level=" << level);
+            const float gradient = std::ldexp(1.f, static_cast<int>(level)) / source->info.width;
+            SamplingInput legacy = inputFor(handle.id, legacyPath, .25f, .75f, static_cast<float>(level));
+            legacy.ddx = make_float2(gradient, 0);
+            legacy.ddy = make_float2(0, gradient);
+            SamplingInput otk = legacy;
+            otk.path = otkPath;
+            std::vector<SamplingResult> results;
+            ASSERT_EQ(harness_.sample(context, {legacy, otk}, results), hipSuccess);
+            ASSERT_EQ(results.size(), 2u);
+            EXPECT_EQ(results[1].resident, 1u);
+            EXPECT_EQ(components(results[1].value), components(results[0].value));
+            if (legacyPath != SamplingPath::Implicit)
+                expectSample(results[1], sourcePixel(*source, level, 0));
+        }
+    }
+    EXPECT_EQ(readRequestCount(context), 0u);
+}
+
+TEST_F(TextureSamplingTest, PagingMapOrRequestPublishesSamplerOnlyWhileResident) {
+    auto source = std::make_shared<TypedImageSource>(makeAuthoredMipSource(true));
+    TextureDesc desc;
+    desc.addressMode[0] = hipAddressModeClamp;
+    desc.mipmapFilterMode = hipFilterModeLinear;
+    TextureHandle handle;
+    hipTextureObject_t texture{};
+    ASSERT_NO_FATAL_FAILURE(requestAndLoad(source, desc, handle, texture));
+    DeviceContext context = loader_->getDeviceContext();
+    ASSERT_NE(context.samplers, nullptr);
+
+    std::vector<SamplingResult> results;
+    ASSERT_EQ(harness_.sample(context, {inputFor(handle.id, SamplingPath::PagingSampler, 0, 0),
+                                        inputFor(handle.id, SamplingPath::PagingSamplerDesc, 0, 0)},
+                              results), hipSuccess);
+    ASSERT_EQ(results.size(), 2u);
+    EXPECT_EQ(results[0].resident, 1u);
+    EXPECT_EQ(components(results[0].value),
+              (std::array<float, 4>{8.f, 8.f, static_cast<float>(source->info.numMipLevels), 0.f}));
+    EXPECT_EQ(results[1].resident, 1u);
+    EXPECT_EQ(components(results[1].value),
+              (std::array<float, 4>{1.f, static_cast<float>(hipAddressModeClamp), 1.f, 1.f}));
+    EXPECT_EQ(readRequestCount(context), 0u);
+
+    // A non-resident sampler page records one request; out-of-range pages record none.
+    auto other = std::make_shared<TypedImageSource>(makeAuthoredMipSource(false));
+    const TextureHandle pending = loader_->createTexture(other, TextureDesc{});
+    ASSERT_TRUE(pending.valid);
+    ASSERT_TRUE(loader_->launchPrepare(nullptr, context));
+    ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
+    ASSERT_EQ(harness_.sample(context, {inputFor(pending.id, SamplingPath::PagingSampler, 0, 0),
+                                        inputFor(context.maxTextures, SamplingPath::PagingSampler, 0, 0)},
+                              results), hipSuccess);
+    ASSERT_EQ(results.size(), 2u);
+    EXPECT_EQ(results[0].resident, 0u);
+    EXPECT_EQ(results[1].resident, 0u);
+    EXPECT_EQ(readRequestCount(context), 1u);
+    uint32_t requested = UINT32_MAX;
+    ASSERT_EQ(hipMemcpy(&requested, context.requests, sizeof(requested), hipMemcpyDeviceToHost), hipSuccess);
+    EXPECT_EQ(requested, pending.id);
+
+    // Unloading retires the published sampler with the texture.
+    loader_->unloadTextureTiles(handle.id);
+    ASSERT_TRUE(loader_->launchPrepare(nullptr, context));
+    ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
+    ASSERT_EQ(harness_.sample(context, {inputFor(handle.id, SamplingPath::PagingSampler, 0, 0),
+                                        inputFor(handle.id, SamplingPath::OtkGradient, .5f, .5f)},
+                              results), hipSuccess);
+    ASSERT_EQ(results.size(), 2u);
+    EXPECT_EQ(results[0].resident, 0u);
+    EXPECT_EQ(results[1].resident, 0u);
+    EXPECT_EQ(components(results[1].value), (std::array<float, 4>{1, 0, 1, 0}));
+    TextureSampler cleared{};
+    ASSERT_EQ(hipMemcpy(&cleared, context.samplers + handle.id, sizeof(cleared), hipMemcpyDeviceToHost),
+              hipSuccess);
+    EXPECT_EQ(cleared.texture, 0u);
+    EXPECT_EQ(cleared.desc.isInitialized, 0u);
+}
+
+TEST_F(SamplingHarnessDeviceTest, GetMipLevelMatchesOptixToolkitFootprint) {
+    TextureSamplingHarness harness;
+    std::filesystem::path module;
+    ASSERT_NO_THROW(module = samplingModulePath());
+    ASSERT_EQ(harness.open(module), hipSuccess);
+    struct Case { float2 ddx, ddy; float invAnisotropy, expected; };
+    // 8x8 texture: a one-texel footprint is level 0, a four-texel footprint is level 2, and a
+    // 4:1 anisotropic footprint is level 2 isotropically but level 0 with anisotropy 4.
+    const Case cases[]{{{1.f / 8, 0}, {0, 1.f / 8}, 1.f, 0.f},
+                       {{.5f, 0}, {0, .5f}, 1.f, 2.f},
+                       {{.5f, 0}, {0, 1.f / 8}, 1.f, 2.f},
+                       {{.5f, 0}, {0, 1.f / 8}, .25f, 0.f},
+                       {{1.f / 16, 0}, {0, 1.f / 16}, 1.f, -1.f}};
+    std::vector<SamplingInput> inputs;
+    for (const auto& c : cases) {
+        SamplingInput input = inputFor(0, SamplingPath::MipLevel, 8, 8, c.invAnisotropy);
+        input.ddx = c.ddx;
+        input.ddy = c.ddy;
+        inputs.push_back(input);
+    }
+    std::vector<SamplingResult> results;
+    ASSERT_EQ(harness.sample(DeviceContext{}, inputs, results), hipSuccess);
+    ASSERT_EQ(results.size(), std::size(cases));
+    for (size_t i = 0; i < std::size(cases); ++i)
+        EXPECT_NEAR(results[i].value.x, cases[i].expected, 1e-5f) << "case=" << i;
+    EXPECT_EQ(harness.close(), hipSuccess);
+}
+
 } // namespace
 } }

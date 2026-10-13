@@ -46,6 +46,36 @@ extern "C" __global__ void sampleLegacyTextures(
         value = make_float4(__uint_as_float(words[5]), 0, 0, 0);
         break;
     }
+    case SamplingPath::OtkImplicit:
+        value = hip_demand::tex2D<float4>(context, input.textureId, input.u, input.v, &resident);
+        break;
+    case SamplingPath::OtkLod:
+        value = hip_demand::tex2DLod<float4>(context, input.textureId, input.u, input.v, input.lod, &resident);
+        break;
+    case SamplingPath::OtkGradient:
+        value = hip_demand::tex2DGrad<float4>(context, input.textureId, input.u, input.v, input.ddx, input.ddy,
+                                              &resident);
+        break;
+    case SamplingPath::PagingSampler:
+    case SamplingPath::PagingSamplerDesc: {
+        const auto* sampler = reinterpret_cast<const hip_demand::TextureSampler*>(
+            hip_demand::pagingMapOrRequest(context, input.textureId, &resident));
+        if (resident && sampler) {
+            if (input.path == SamplingPath::PagingSampler)
+                value = make_float4(sampler->width, sampler->height, sampler->desc.numMipLevels,
+                                    sampler->mipTailFirstLevel);
+            else
+                value = make_float4(sampler->desc.maxAnisotropy, sampler->desc.wrapMode0,
+                                    sampler->desc.mipmapFilterMode,
+                                    sampler->texture == context.textures[input.textureId] ? 1.f : 0.f);
+        }
+        break;
+    }
+    case SamplingPath::MipLevel:
+        value = make_float4(getMipLevel(input.ddx, input.ddy, static_cast<int>(input.u),
+                                        static_cast<int>(input.v), input.lod), 0, 0, 0);
+        resident = true;
+        break;
     }
     outputs[index].value = value;
     outputs[index].resident = resident ? 1u : 0u;

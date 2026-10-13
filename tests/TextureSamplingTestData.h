@@ -9,7 +9,11 @@
 namespace hip_demand { namespace test {
 
 enum class SamplingPath : uint32_t {
-    Implicit, Lod, Gradient, RecordRequest, NativeLod, NativeSamplerWords, NativeImageControlWord
+    Implicit, Lod, Gradient, RecordRequest, NativeLod, NativeSamplerWords, NativeImageControlWord,
+    // OptiX Toolkit-style entry points. PagingSampler returns (width, height, numMipLevels,
+    // mipTailFirstLevel); PagingSamplerDesc returns (maxAnisotropy, wrapMode0, mipmapFilterMode,
+    // texture == context.textures[id]); MipLevel returns getMipLevel(ddx, ddy, u, v, lod) in x.
+    OtkImplicit, OtkLod, OtkGradient, PagingSampler, PagingSamplerDesc, MipLevel
 };
 
 struct SamplingInput {
