@@ -50,6 +50,25 @@ LoaderError hipLoaderError(hipError_t error) {
     return error == hipErrorOutOfMemory ? LoaderError::OutOfMemory : LoaderError::HipError;
 }
 
+// Build the device sampler record for a resident texture. Whole textures are one load unit,
+// so the tiling fields stay zero and the mip tail starts at level 0.
+TextureSampler makeSampler(const TextureMetadata& info) {
+    TextureSampler sampler{};
+    sampler.texture = (TextureObject)info.texObj;
+    sampler.desc.isInitialized = 1;
+    sampler.desc.numMipLevels = static_cast<unsigned int>(std::clamp(info.numMipLevels, 1, 31));
+    sampler.desc.wrapMode0 = static_cast<unsigned int>(info.desc.addressMode[0]);
+    sampler.desc.wrapMode1 = static_cast<unsigned int>(info.desc.addressMode[1]);
+    sampler.desc.mipmapFilterMode = info.desc.mipmapFilterMode == hipFilterModeLinear ? 1u : 0u;
+    // The hardware sampler is created without anisotropy, so report isotropic filtering.
+    sampler.desc.maxAnisotropy = 1;
+    sampler.width = static_cast<unsigned int>(info.width);
+    sampler.height = static_cast<unsigned int>(info.height);
+    sampler.mipTailFirstLevel = 0;
+    sampler.filterMode = static_cast<unsigned int>(info.desc.filterMode);
+    return sampler;
+}
+
 void validateRegistrationImage(const TextureInfo& info) {
     if (!info.isValid)
         throw std::invalid_argument("Invalid source metadata");
@@ -83,6 +102,7 @@ LoaderError DemandTextureLoader::Impl::initialize() {
     if (options_.maxTextures == 0 || options_.maxTextures > UINT32_MAX ||
         options_.maxRequestsPerLaunch == 0 || options_.maxRequestsPerLaunch > UINT32_MAX ||
         options_.maxTextures > SIZE_MAX / sizeof(TextureObject) ||
+        options_.maxTextures > SIZE_MAX / sizeof(TextureSampler) ||
         options_.maxRequestsPerLaunch > SIZE_MAX / sizeof(uint32_t) ||
         options_.maxTextures > textures_.max_size()) {
         return LoaderError::InvalidParameter;
@@ -100,6 +120,10 @@ LoaderError DemandTextureLoader::Impl::initialize() {
     if (err != hipSuccess) return hipLoaderError(err);
     err = hipCalls_.call(HipOperation::DeviceAllocation, [&] {
         return hipMalloc(&deviceContext_.textures, options_.maxTextures * sizeof(TextureObject));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
+    err = hipCalls_.call(HipOperation::DeviceAllocation, [&] {
+        return hipMalloc(&deviceContext_.samplers, options_.maxTextures * sizeof(TextureSampler));
     });
     if (err != hipSuccess) return hipLoaderError(err);
 
@@ -125,6 +149,10 @@ LoaderError DemandTextureLoader::Impl::initialize() {
     });
     if (err != hipSuccess) return hipLoaderError(err);
     err = hipCalls_.call(HipOperation::Initialize, [&] {
+        return hipMemset(deviceContext_.samplers, 0, options_.maxTextures * sizeof(TextureSampler));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
+    err = hipCalls_.call(HipOperation::Initialize, [&] {
         return hipMemset(d_requestStats_, 0, sizeof(RequestStats));
     });
     if (err != hipSuccess) return hipLoaderError(err);
@@ -140,6 +168,10 @@ LoaderError DemandTextureLoader::Impl::initialize() {
     });
     if (err != hipSuccess) return hipLoaderError(err);
     err = hipCalls_.call(HipOperation::HostAllocation, [&] {
+        return hipHostMalloc(reinterpret_cast<void**>(&h_samplers_), options_.maxTextures * sizeof(TextureSampler));
+    });
+    if (err != hipSuccess) return hipLoaderError(err);
+    err = hipCalls_.call(HipOperation::HostAllocation, [&] {
         return hipHostMalloc(reinterpret_cast<void**>(&h_requests_), options_.maxRequestsPerLaunch * sizeof(uint32_t));
     });
     if (err != hipSuccess) return hipLoaderError(err);
@@ -150,6 +182,7 @@ LoaderError DemandTextureLoader::Impl::initialize() {
 
     std::fill_n(h_residentFlags_, flagWords, 0u);
     std::fill_n(h_textures_, options_.maxTextures, static_cast<TextureObject>(0));
+    std::fill_n(h_samplers_, options_.maxTextures, TextureSampler{});
     std::fill_n(h_requests_, options_.maxRequestsPerLaunch, 0u);
     h_requestStats_->count = 0;
     h_requestStats_->overflow = 0;
@@ -210,11 +243,13 @@ DemandTextureLoader::Impl::~Impl() {
 
     if (h_residentFlags_) HIP_CHECK(hipHostFree(h_residentFlags_));
     if (h_textures_) HIP_CHECK(hipHostFree(h_textures_));
+    if (h_samplers_) HIP_CHECK(hipHostFree(h_samplers_));
     if (h_requests_) HIP_CHECK(hipHostFree(h_requests_));
     if (h_requestStats_) HIP_CHECK(hipHostFree(h_requestStats_));
 
     if (deviceContext_.residentFlags) HIP_CHECK(hipFree(deviceContext_.residentFlags));
     if (deviceContext_.textures) HIP_CHECK(hipFree(deviceContext_.textures));
+    if (deviceContext_.samplers) HIP_CHECK(hipFree(deviceContext_.samplers));
     if (deviceContext_.requests) HIP_CHECK(hipFree(deviceContext_.requests));
     if (d_requestStats_) HIP_CHECK(hipFree(d_requestStats_));
 }
@@ -545,6 +580,16 @@ void DemandTextureLoader::Impl::launchPrepare(hipStream_t stream) {
             if (err != hipSuccess) {
                 lastError_ = LoaderError::HipError;
                 logMessage(LogLevel::Error, "launchPrepare: hipMemcpyAsync(textures dirty) failed: %s", hipGetErrorString(err));
+                return;
+            }
+            err = hipMemcpyAsync(deviceContext_.samplers + begin,
+                                 h_samplers_ + begin,
+                                 count * sizeof(TextureSampler),
+                                 hipMemcpyHostToDevice,
+                                 stream);
+            if (err != hipSuccess) {
+                lastError_ = LoaderError::HipError;
+                logMessage(LogLevel::Error, "launchPrepare: hipMemcpyAsync(samplers dirty) failed: %s", hipGetErrorString(err));
                 return;
             }
         }
@@ -1158,6 +1203,7 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
     // Keep the source channel count: cachedData still holds that native layout
     // and must be decoded with the same stride after unload or eviction.
     h_textures_[texId] = (TextureObject) info.texObj;
+    h_samplers_[texId] = makeSampler(info);
     uint32_t wordIdx = texId / 32;
     uint32_t bitIdx = texId % 32;
     h_residentFlags_[wordIdx] |= (1u << bitIdx);
@@ -1261,6 +1307,7 @@ void DemandTextureLoader::Impl::destroyTexture(uint32_t texId) {
     info.numMipLevels = 0;
 
     h_textures_[texId] = 0;
+    h_samplers_[texId] = TextureSampler{};
     uint32_t wordIdx = texId / 32;
     uint32_t bitIdx = texId % 32;
     h_residentFlags_[wordIdx] &= ~(1u << bitIdx);

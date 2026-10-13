@@ -179,8 +179,9 @@ TEST_F(SharedContractDevice, RequiredMipPolicyRejectsUndeclaredBaseOnlyFallback)
 TEST_F(SharedContractDevice, LegacyEntryPointAndTextureZeroAreUnchanged) {
     static_assert(sizeof(hip_demand::TextureDesc) == 28);
     static_assert(sizeof(hip_demand::TextureHandle) == 24);
-    static_assert(sizeof(hip_demand::DeviceContext) == 48);
+    static_assert(sizeof(hip_demand::DeviceContext) == 56);
     static_assert(offsetof(hip_demand::DeviceContext, maxTextures) == 40);
+    static_assert(offsetof(hip_demand::DeviceContext, samplers) == 48);
     static_assert(offsetof(hip_demand::TextureDesc, evictionPriority) == 24);
     static_assert(offsetof(hip_demand::TextureHandle, error) == 20);
     hip_demand::LoaderOptions options;

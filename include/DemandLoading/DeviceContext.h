@@ -6,6 +6,8 @@
 
 #include <cstdint>
 
+#include "DemandLoading/TextureSampler.h"
+
 namespace hip_demand {
 
 /// Platform-agnostic texture object handle.
@@ -22,6 +24,9 @@ struct DeviceContext {
     uint32_t* requestOverflow;    // Flag set when request buffer overflows
     uint32_t maxTextures;
     uint32_t maxRequests;
+    // Appended after the original fields so their offsets stay unchanged.
+    // Entry N is valid only while the resident flag for texture N is set.
+    TextureSampler* samplers;     // Array of maxTextures sampler records
 };
 
 } // namespace hip_demand
