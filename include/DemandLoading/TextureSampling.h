@@ -316,6 +316,21 @@ __device__ __forceinline__ float4 cubicFetch(hipTextureObject_t texture, float s
 __device__ __forceinline__ float4 lerp4(float4 a, float4 b, float w) {
     return a + (b - a) * w;
 }
+
+// Selects the mip level from the footprint and blends the two levels linearly in the fractional LOD.
+__device__ __forceinline__ float4 sampleLinearMip(hipTextureObject_t texture, int width, int height,
+                                                  int numMipLevels, bool pointMips, float s, float t,
+                                                  float2 ddx, float2 ddy, float maxAnisotropy) {
+    float ml = getMipLevel(ddx, ddy, width, height, 1.0f / maxAnisotropy);
+    if (pointMips)
+        ml = ceilf(ml - 0.5f);
+    ml = fminf(fmaxf(ml, 0.0f), (float)(numMipLevels - 1));
+    const float level = floorf(ml);
+    float4 result = ::tex2DLod<float4>(texture, s, t, level);
+    if (ml > level)
+        result = lerp4(result, ::tex2DLod<float4>(texture, s, t, level + 1.0f), ml - level);
+    return result;
+}
 }  // namespace detail
 
 /// Cubic filtered sample with explicit gradients, as in the OptiX Toolkit's tex2DCubic.
@@ -338,7 +353,9 @@ __device__ inline bool tex2DCubic(const DeviceContext& ctx, unsigned int texture
     const int texHeight = (int)sampler->height;
     const int numMipLevels = max((int)sampler->desc.numMipLevels, 1);
     const bool pointMips = sampler->desc.mipmapFilterMode == 0;
-    const float invAnisotropy = 1.0f / (float)max((int)sampler->desc.maxAnisotropy, 1);
+    // The footprint is computed for 16:1 anisotropy, the OptiX Toolkit default, although the
+    // hardware takes a single tap. The hardware mip blend is not linear, so blend in software.
+    const float invAnisotropy = 1.0f / 16.0f;
 
     const float p1 = (ddx.x * texWidth) * (ddx.x * texWidth) + (ddx.y * texHeight) * (ddx.y * texHeight);
     const float p2 = (ddy.x * texWidth) * (ddy.x * texWidth) + (ddy.y * texHeight) * (ddy.y * texHeight);
@@ -362,7 +379,8 @@ __device__ inline bool tex2DCubic(const DeviceContext& ctx, unsigned int texture
         mipLevel = max((int)floorf(ml), 0);
     }
 
-    result = ::tex2DGrad<float4>(texture, s, t, ddx, ddy);
+    result = detail::sampleLinearMip(texture, texWidth, texHeight, numMipLevels, pointMips, s, t, ddx, ddy,
+                                     1.0f / invAnisotropy);
     if (cubicBlend <= 0.0f)
         return true;
 
@@ -389,6 +407,28 @@ __device__ inline Sample tex2DCubic(const DeviceContext& ctx, unsigned int textu
     Sample rval;
     detail::convertType(value, rval);
     return rval;
+}
+
+/// Gradient sample that selects the mip level in software, as the OptiX Toolkit's footprint does,
+/// and blends the two levels linearly in the fractional LOD. The hardware blend is
+/// clamp(0.5 + 1.25 (f - 0.5), 0, 1), which has no mixing within 0.1 of a level.
+/// maxAnisotropy is the anisotropy the footprint is computed for (1 is isotropic).
+__device__ inline bool tex2DGradLinearMip(const DeviceContext& ctx, unsigned int textureId, float s, float t,
+                                          float2 ddx, float2 ddy, float maxAnisotropy, float4& result,
+                                          float4 defaultColor = make_float4(1.0f, 0.0f, 1.0f, 0.0f)) {
+    bool resident = false;
+    const auto* sampler =
+        reinterpret_cast<const TextureSampler*>(pagingMapOrRequest(ctx, textureId, &resident));
+    if (!resident || !sampler) {
+        result = defaultColor;
+        return false;
+    }
+
+    const hipTextureObject_t texture = (hipTextureObject_t)sampler->texture;
+    result = detail::sampleLinearMip(texture, (int)sampler->width, (int)sampler->height,
+                                     max((int)sampler->desc.numMipLevels, 1),
+                                     sampler->desc.mipmapFilterMode == 0, s, t, ddx, ddy, maxAnisotropy);
+    return true;
 }
 
 } // namespace hip_demand

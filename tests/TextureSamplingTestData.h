@@ -15,7 +15,9 @@ enum class SamplingPath : uint32_t {
     // texture == context.textures[id]); MipLevel returns getMipLevel(ddx, ddy, u, v, lod) in x.
     OtkImplicit, OtkLod, OtkGradient, PagingSampler, PagingSamplerDesc, MipLevel,
     // Cubic samples with the gradients and uses lod as the filter mode (2 bicubic, 3 smart bicubic).
-    Cubic
+    Cubic,
+    // Gradient sample with a software mip blend; lod is the anisotropy of the footprint.
+    LinearMip
 };
 
 struct SamplingInput {

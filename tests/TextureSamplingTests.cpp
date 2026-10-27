@@ -1119,6 +1119,42 @@ TEST_F(TextureSamplingTest, CubicSamplingMatchesBSplineReference) {
     }
 }
 
+TEST_F(TextureSamplingTest, LinearMipBlendIsLinearInTheFractionalLod) {
+    auto source = std::make_shared<TypedImageSource>(makeAuthoredMipSource(true));
+    TextureDesc desc;
+    desc.addressMode[0] = desc.addressMode[1] = hipAddressModeClamp;
+    desc.mipmapFilterMode = hipFilterModeLinear;
+    TextureHandle handle;
+    hipTextureObject_t texture{};
+    ASSERT_NO_FATAL_FAILURE(requestAndLoad(source, desc, handle, texture));
+
+    // The hardware blend is flat within 0.1 of a level and steeper than linear elsewhere.
+    std::vector<SamplingInput> inputs;
+    std::vector<std::array<float, 4>> expected;
+    for (unsigned int level : {0u, 1u, 2u}) {
+        for (float fraction : {0.f, .05f, .25f, .5f, .75f, .95f}) {
+            const float footprint = std::exp2(level + fraction) / source->info.width;
+            auto input = inputFor(handle.id, SamplingPath::LinearMip, .5f, .5f, 1.f);
+            input.ddx = {footprint, 0};
+            input.ddy = {0, footprint};
+            inputs.push_back(input);
+            const auto first = sourcePixel(*source, level, 0), second = sourcePixel(*source, level + 1, 0);
+            std::array<float, 4> blend{};
+            for (size_t channel = 0; channel < 4; ++channel)
+                blend[channel] = first[channel] + fraction * (second[channel] - first[channel]);
+            expected.push_back(blend);
+        }
+    }
+    std::vector<SamplingResult> results;
+    ASSERT_EQ(harness_.sample(loader_->getDeviceContext(), inputs, results), hipSuccess);
+    ASSERT_EQ(results.size(), inputs.size());
+    // The level colors differ by up to 10, so allow for the float precision of the LOD
+    for (size_t index = 0; index < results.size(); ++index) {
+        SCOPED_TRACE(index);
+        expectSample(results[index], expected[index], {.01f, .01f, .01f, .01f});
+    }
+}
+
 TEST_F(SamplingHarnessDeviceTest, GetMipLevelMatchesOptixToolkitFootprint) {
     TextureSamplingHarness harness;
     std::filesystem::path module;
