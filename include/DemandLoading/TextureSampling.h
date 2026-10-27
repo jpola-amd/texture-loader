@@ -235,4 +235,160 @@ __device__ inline Sample tex2D(const DeviceContext& ctx, unsigned int textureId,
     return rval;
 }
 
+namespace detail {
+__device__ __forceinline__ float4 cubicWeights(float x) {
+    float4 w;
+    w.x = -x * x * x + 3.0f * x * x - 3.0f * x + 1.0f;
+    w.y = 3.0f * x * x * x - 6.0f * x * x + 4.0f;
+    w.z = -3.0f * x * x * x + 3.0f * x * x + 3.0f * x + 1.0f;
+    w.w = x * x * x;
+    return w * (1.0f / 6.0f);
+}
+
+__device__ __forceinline__ float getPixelSpanForCubic(float2 ddx, float2 ddy, float width, float height) {
+    const float spanX = fmaxf(fabsf(ddx.x), fabsf(ddy.x)) * width;
+    const float spanY = fmaxf(fabsf(ddx.y), fabsf(ddy.y)) * height;
+    return fmaxf(spanX, spanY) + 1.0e-8f;
+}
+
+// Keep the gradients usable: not zero, not shorter than a texel and not more anisotropic than 16:1.
+__device__ __forceinline__ void fixGradients(float2& ddx, float2& ddy, int width, int height) {
+    const float invAniso2 = 1.0f / (16.0f * 16.0f);
+    const float minVal = 0.99f / fmaxf((float)width, (float)height);
+
+    float ddx2 = ddx.x * ddx.x + ddx.y * ddx.y;
+    float ddy2 = ddy.x * ddy.x + ddy.y * ddy.y;
+    if (ddx2 > minVal * minVal && ddy2 > minVal * minVal && ddx2 >= invAniso2 * ddy2 &&
+        ddy2 >= invAniso2 * ddx2)
+        return;
+
+    if (ddx2 == 0.0f)
+        ddx = make_float2(minVal, 0.0f);
+    if (ddy2 == 0.0f)
+        ddy = make_float2(0.0f, minVal);
+
+    ddx2 = ddx.x * ddx.x + ddx.y * ddx.y;
+    if (ddx2 < minVal * minVal) {
+        const float scale = minVal / sqrtf(ddx2);
+        ddx = make_float2(ddx.x * scale, ddx.y * scale);
+    }
+    ddy2 = ddy.x * ddy.x + ddy.y * ddy.y;
+    if (ddy2 < minVal * minVal) {
+        const float scale = minVal / sqrtf(ddy2);
+        ddy = make_float2(ddy.x * scale, ddy.y * scale);
+    }
+
+    ddx2 = ddx.x * ddx.x + ddx.y * ddx.y;
+    ddy2 = ddy.x * ddy.x + ddy.y * ddy.y;
+    if (ddx2 * invAniso2 > ddy2) {
+        const float scale = sqrtf(ddy2 / (ddx2 * invAniso2));
+        ddx = make_float2(ddx.x * scale, ddx.y * scale);
+    }
+    if (ddy2 * invAniso2 > ddx2) {
+        const float scale = sqrtf(ddx2 / (ddy2 * invAniso2));
+        ddy = make_float2(ddy.x * scale, ddy.y * scale);
+    }
+}
+
+// Cubic B-spline filter of one mip level from four bilinear fetches.
+__device__ __forceinline__ float4 cubicFetch(hipTextureObject_t texture, float s, float t, int mipLevel,
+                                             int mipWidth, int mipHeight) {
+    const float ts = s * mipWidth - 0.5f;
+    const float tt = t * mipHeight - 0.5f;
+    const float i = floorf(ts);
+    const float j = floorf(tt);
+    const float4 wx = cubicWeights(ts - i);
+    const float4 wy = cubicWeights(tt - j);
+
+    const float x0 = (i - 0.5f + wx.y / (wx.x + wx.y)) / mipWidth;
+    const float x1 = (i + 1.5f + wx.w / (wx.z + wx.w)) / mipWidth;
+    const float y0 = (j - 0.5f + wy.y / (wy.x + wy.y)) / mipHeight;
+    const float y1 = (j + 1.5f + wy.w / (wy.z + wy.w)) / mipHeight;
+
+    const float4 t0 = ::tex2DLod<float4>(texture, x0, y0, (float)mipLevel);
+    const float4 t1 = ::tex2DLod<float4>(texture, x1, y0, (float)mipLevel);
+    const float4 t2 = ::tex2DLod<float4>(texture, x0, y1, (float)mipLevel);
+    const float4 t3 = ::tex2DLod<float4>(texture, x1, y1, (float)mipLevel);
+    return t0 * ((wx.x + wx.y) * (wy.x + wy.y)) + t1 * ((wx.z + wx.w) * (wy.x + wy.y)) +
+           t2 * ((wx.x + wx.y) * (wy.z + wy.w)) + t3 * ((wx.z + wx.w) * (wy.z + wy.w));
+}
+
+__device__ __forceinline__ float4 lerp4(float4 a, float4 b, float w) {
+    return a + (b - a) * w;
+}
+}  // namespace detail
+
+/// Cubic filtered sample with explicit gradients, as in the OptiX Toolkit's tex2DCubic.
+/// filterMode uses the OptiX Toolkit numbering: 2 is bicubic, 3 is smart bicubic (cubic when
+/// magnified, bilinear when minified) and anything else is plain bilinear.
+/// Sets result and returns true if the texture is resident. Otherwise it records a request.
+__device__ inline bool tex2DCubic(const DeviceContext& ctx, unsigned int textureId, float s, float t,
+                                  float2 ddx, float2 ddy, unsigned int filterMode, float4& result,
+                                  float4 defaultColor = make_float4(1.0f, 0.0f, 1.0f, 0.0f)) {
+    bool resident = false;
+    const auto* sampler =
+        reinterpret_cast<const TextureSampler*>(pagingMapOrRequest(ctx, textureId, &resident));
+    if (!resident || !sampler) {
+        result = defaultColor;
+        return false;
+    }
+
+    const hipTextureObject_t texture = (hipTextureObject_t)sampler->texture;
+    const int texWidth = (int)sampler->width;
+    const int texHeight = (int)sampler->height;
+    const int numMipLevels = max((int)sampler->desc.numMipLevels, 1);
+    const bool pointMips = sampler->desc.mipmapFilterMode == 0;
+    const float invAnisotropy = 1.0f / (float)max((int)sampler->desc.maxAnisotropy, 1);
+
+    const float p1 = (ddx.x * texWidth) * (ddx.x * texWidth) + (ddx.y * texHeight) * (ddx.y * texHeight);
+    const float p2 = (ddy.x * texWidth) * (ddy.x * texWidth) + (ddy.y * texHeight) * (ddy.y * texHeight);
+    const float maxGradientLengthInPixels = sqrtf(fmaxf(p1, p2));
+
+    detail::fixGradients(ddx, ddy, texWidth, texHeight);
+
+    const bool bicubic = filterMode == 2;
+    float cubicBlend = bicubic ? 1.0f : 0.0f;
+    if (filterMode == 3 && maxGradientLengthInPixels < 2.0f)
+        cubicBlend = fminf(2.0f - maxGradientLengthInPixels, 1.0f);
+
+    // Only bicubic picks a mip level here; smart bicubic cubic-filters the base level.
+    float ml = 0.0f;
+    int mipLevel = 0;
+    if (bicubic) {
+        ml = getMipLevel(ddx, ddy, texWidth, texHeight, invAnisotropy);
+        if (pointMips)
+            ml = fmaxf(0.0f, ceilf(ml - 0.5f));
+        ml = fminf(ml, (float)(numMipLevels - 1));
+        mipLevel = max((int)floorf(ml), 0);
+    }
+
+    result = ::tex2DGrad<float4>(texture, s, t, ddx, ddy);
+    if (cubicBlend <= 0.0f)
+        return true;
+
+    float4 cubic = detail::cubicFetch(texture, s, t, mipLevel, max(texWidth >> mipLevel, 1),
+                                      max(texHeight >> mipLevel, 1));
+    result = detail::lerp4(result, cubic, cubicBlend);
+
+    // Blend with the next level for bicubic
+    if (!bicubic || pointMips || ml == (float)mipLevel || ml <= 0.0f)
+        return true;
+    ++mipLevel;
+    cubic = detail::cubicFetch(texture, s, t, mipLevel, max(texWidth >> mipLevel, 1),
+                               max(texHeight >> mipLevel, 1));
+    result = detail::lerp4(cubic, result, (float)mipLevel - ml);
+    return true;
+}
+
+/// Cubic filtered sample. Sample is float, float2, or float4. See the float4 overload.
+template <class Sample>
+__device__ inline Sample tex2DCubic(const DeviceContext& ctx, unsigned int textureId, float x, float y,
+                                    float2 ddx, float2 ddy, unsigned int filterMode, bool* isResident) {
+    float4 value = detail::nonResidentColor();
+    *isResident = tex2DCubic(ctx, textureId, x, y, ddx, ddy, filterMode, value, value);
+    Sample rval;
+    detail::convertType(value, rval);
+    return rval;
+}
+
 } // namespace hip_demand

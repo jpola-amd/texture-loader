@@ -76,6 +76,10 @@ extern "C" __global__ void sampleLegacyTextures(
                                         static_cast<int>(input.v), input.lod), 0, 0, 0);
         resident = true;
         break;
+    case SamplingPath::Cubic:
+        resident = hip_demand::tex2DCubic(context, input.textureId, input.u, input.v, input.ddx, input.ddy,
+                                          static_cast<unsigned int>(input.lod), value, input.defaultColor);
+        break;
     }
     outputs[index].value = value;
     outputs[index].resident = resident ? 1u : 0u;

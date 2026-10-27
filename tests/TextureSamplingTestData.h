@@ -13,7 +13,9 @@ enum class SamplingPath : uint32_t {
     // OptiX Toolkit-style entry points. PagingSampler returns (width, height, numMipLevels,
     // mipTailFirstLevel); PagingSamplerDesc returns (maxAnisotropy, wrapMode0, mipmapFilterMode,
     // texture == context.textures[id]); MipLevel returns getMipLevel(ddx, ddy, u, v, lod) in x.
-    OtkImplicit, OtkLod, OtkGradient, PagingSampler, PagingSamplerDesc, MipLevel
+    OtkImplicit, OtkLod, OtkGradient, PagingSampler, PagingSamplerDesc, MipLevel,
+    // Cubic samples with the gradients and uses lod as the filter mode (2 bicubic, 3 smart bicubic).
+    Cubic
 };
 
 struct SamplingInput {

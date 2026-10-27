@@ -1050,6 +1050,75 @@ TEST_F(TextureSamplingTest, PagingMapOrRequestPublishesSamplerOnlyWhileResident)
     EXPECT_EQ(cleared.desc.isInitialized, 0u);
 }
 
+TEST_F(TextureSamplingTest, CubicSamplingMatchesBSplineReference) {
+    constexpr int size = 8;
+    auto source = std::make_shared<TypedImageSource>();
+    source->info.width = source->info.height = size;
+    source->info.numChannels = 4;
+    source->info.numMipLevels = 1;
+    source->info.format = HIP_AD_FORMAT_FLOAT;
+    source->info.isValid = true;
+    std::vector<float> texels(size * size * 4);
+    for (int y = 0; y < size; ++y)
+        for (int x = 0; x < size; ++x)
+            for (int c = 0; c < 4; ++c)
+                texels[(y * size + x) * 4 + c] = ((x * 7 + y * 13 + c * 5) % 11) / 10.f;
+    source->pixels.resize(texels.size() * sizeof(float));
+    std::memcpy(source->pixels.data(), texels.data(), source->pixels.size());
+
+    TextureDesc desc;
+    desc.generateMipmaps = false;
+    desc.filterMode = hipFilterModeLinear;
+    desc.addressMode[0] = desc.addressMode[1] = hipAddressModeClamp;
+    TextureHandle handle;
+    hipTextureObject_t texture{};
+    ASSERT_NO_FATAL_FAILURE(requestAndLoad(source, desc, handle, texture));
+
+    // Cubic B-spline over the 4x4 neighbourhood, with clamped texel addresses.
+    auto weights = [](float x) {
+        return std::array<float, 4>{(1 - x) * (1 - x) * (1 - x) / 6, (3 * x * x * x - 6 * x * x + 4) / 6,
+                                    (-3 * x * x * x + 3 * x * x + 3 * x + 1) / 6, x * x * x / 6};
+    };
+    auto reference = [&](float u, float v, int channel) {
+        const float ts = u * size - .5f, tt = v * size - .5f;
+        const int i = static_cast<int>(std::floor(ts)), j = static_cast<int>(std::floor(tt));
+        const auto wx = weights(ts - i), wy = weights(tt - j);
+        float sum = 0;
+        for (int dy = 0; dy < 4; ++dy)
+            for (int dx = 0; dx < 4; ++dx) {
+                const int x = std::clamp(i - 1 + dx, 0, size - 1), y = std::clamp(j - 1 + dy, 0, size - 1);
+                sum += wx[dx] * wy[dy] * texels[(y * size + x) * 4 + channel];
+            }
+        return sum;
+    };
+
+    const std::array<std::array<float, 2>, 5> coordinates{{{.4375f, .4375f}, {.5f, .5f}, {.3f, .71f},
+                                                           {.02f, .93f}, {.8125f, .1f}}};
+    std::vector<SamplingInput> inputs;
+    // One texel gradients select level 0 for bicubic, and smart bicubic is fully cubic when magnified
+    for (float filterMode : {2.f, 3.f}) {
+        for (const auto& uv : coordinates) {
+            auto input = inputFor(handle.id, SamplingPath::Cubic, uv[0], uv[1], filterMode);
+            input.ddx = {1.f / size, 0};
+            input.ddy = {0, 1.f / size};
+            inputs.push_back(input);
+        }
+    }
+    std::vector<SamplingResult> results;
+    ASSERT_EQ(harness_.sample(loader_->getDeviceContext(), inputs, results), hipSuccess);
+    ASSERT_EQ(results.size(), inputs.size());
+    // The bilinear fetches use 8-bit weights
+    const float tolerance = 1.f / 64;
+    for (size_t index = 0; index < results.size(); ++index) {
+        SCOPED_TRACE(::testing::Message() << "filter=" << inputs[index].lod << " u=" << inputs[index].u
+                                        << " v=" << inputs[index].v);
+        expectSample(results[index],
+                     {reference(inputs[index].u, inputs[index].v, 0), reference(inputs[index].u, inputs[index].v, 1),
+                      reference(inputs[index].u, inputs[index].v, 2), reference(inputs[index].u, inputs[index].v, 3)},
+                     {tolerance, tolerance, tolerance, tolerance});
+    }
+}
+
 TEST_F(SamplingHarnessDeviceTest, GetMipLevelMatchesOptixToolkitFootprint) {
     TextureSamplingHarness harness;
     std::filesystem::path module;
