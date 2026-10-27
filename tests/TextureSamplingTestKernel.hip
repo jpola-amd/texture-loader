@@ -80,6 +80,10 @@ extern "C" __global__ void sampleLegacyTextures(
         resident = hip_demand::tex2DCubic(context, input.textureId, input.u, input.v, input.ddx, input.ddy,
                                           static_cast<unsigned int>(input.lod), value, input.defaultColor);
         break;
+    case SamplingPath::LinearMip:
+        resident = hip_demand::tex2DGradLinearMip(context, input.textureId, input.u, input.v, input.ddx,
+                                                  input.ddy, input.lod, value, input.defaultColor);
+        break;
     }
     outputs[index].value = value;
     outputs[index].resident = resident ? 1u : 0u;
