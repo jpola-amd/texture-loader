@@ -1155,6 +1155,62 @@ TEST_F(TextureSamplingTest, LinearMipBlendIsLinearInTheFractionalLod) {
     }
 }
 
+TEST_F(TextureSamplingTest, LinearMipAveragesAnisotropicTapsAlongTheMajorAxis) {
+    constexpr int size = 8;
+    auto source = std::make_shared<TypedImageSource>();
+    source->info.width = source->info.height = size;
+    source->info.numChannels = 4;
+    source->info.numMipLevels = 1;
+    source->info.format = HIP_AD_FORMAT_FLOAT;
+    source->info.isValid = true;
+    // Vertical stripes: even columns are 0, odd columns are 1
+    std::vector<float> texels(size * size * 4);
+    for (int y = 0; y < size; ++y)
+        for (int x = 0; x < size; ++x)
+            for (int c = 0; c < 4; ++c)
+                texels[(y * size + x) * 4 + c] = static_cast<float>(x % 2);
+    source->pixels.resize(texels.size() * sizeof(float));
+    std::memcpy(source->pixels.data(), texels.data(), source->pixels.size());
+
+    TextureDesc desc;
+    desc.generateMipmaps = false;
+    desc.filterMode = hipFilterModeLinear;
+    desc.addressMode[0] = desc.addressMode[1] = hipAddressModeClamp;
+    TextureHandle handle;
+    hipTextureObject_t texture{};
+    ASSERT_NO_FATAL_FAILURE(requestAndLoad(source, desc, handle, texture));
+
+    // The centre of texel 4 (value 0)
+    const float u = 4.5f / size, v = 4.5f / size;
+    std::vector<SamplingInput> inputs;
+    // A 4:1 footprint across the stripes: four taps on texels 3 to 6 average to 0.5
+    auto anisotropic = inputFor(handle.id, SamplingPath::LinearMip, u, v, 16.f);
+    anisotropic.ddx = {4.f / size, 0};
+    anisotropic.ddy = {0, 1.f / size};
+    inputs.push_back(anisotropic);
+    // The same footprint with maxAnisotropy 1 takes one tap, on texel 4
+    auto isotropicLimit = anisotropic;
+    isotropicLimit.lod = 1.f;
+    inputs.push_back(isotropicLimit);
+    // A one-texel footprint takes one tap even with maxAnisotropy 16
+    auto oneTexel = anisotropic;
+    oneTexel.ddx = {1.f / size, 0};
+    inputs.push_back(oneTexel);
+    // A mildly anisotropic footprint (1.25:1) rounds to one tap
+    auto mild = anisotropic;
+    mild.ddx = {1.25f / size, 0};
+    inputs.push_back(mild);
+
+    std::vector<SamplingResult> results;
+    ASSERT_EQ(harness_.sample(loader_->getDeviceContext(), inputs, results), hipSuccess);
+    ASSERT_EQ(results.size(), inputs.size());
+    const float tolerance = 1.f / 64;
+    expectSample(results[0], {.5f, .5f, .5f, .5f}, {tolerance, tolerance, tolerance, tolerance});
+    expectSample(results[1], {0, 0, 0, 0}, {tolerance, tolerance, tolerance, tolerance});
+    expectSample(results[2], {0, 0, 0, 0}, {tolerance, tolerance, tolerance, tolerance});
+    expectSample(results[3], {0, 0, 0, 0}, {tolerance, tolerance, tolerance, tolerance});
+}
+
 TEST_F(SamplingHarnessDeviceTest, GetMipLevelMatchesOptixToolkitFootprint) {
     TextureSamplingHarness harness;
     std::filesystem::path module;

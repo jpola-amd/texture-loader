@@ -318,6 +318,8 @@ __device__ __forceinline__ float4 lerp4(float4 a, float4 b, float w) {
 }
 
 // Selects the mip level from the footprint and blends the two levels linearly in the fractional LOD.
+// For an anisotropic footprint the level only covers the minor axis, so, as the hardware does with
+// maxAnisotropy > 1, average several such taps spread along the major axis. One tap would alias.
 __device__ __forceinline__ float4 sampleLinearMip(hipTextureObject_t texture, int width, int height,
                                                   int numMipLevels, bool pointMips, float s, float t,
                                                   float2 ddx, float2 ddy, float maxAnisotropy) {
@@ -326,10 +328,38 @@ __device__ __forceinline__ float4 sampleLinearMip(hipTextureObject_t texture, in
         ml = ceilf(ml - 0.5f);
     ml = fminf(fmaxf(ml, 0.0f), (float)(numMipLevels - 1));
     const float level = floorf(ml);
-    float4 result = ::tex2DLod<float4>(texture, s, t, level);
-    if (ml > level)
-        result = lerp4(result, ::tex2DLod<float4>(texture, s, t, level + 1.0f), ml - level);
-    return result;
+
+    // Taps: the major to minor ratio of the footprint ellipse, rounded and at most maxAnisotropy.
+    // Rounding (not ceil) matches the CUDA hardware best on Arnold's testsuite: a mildly
+    // anisotropic footprint keeps one tap. One tap when the footprint is within a texel, or at the
+    // coarsest level of a mip chain, where the taps would read the same texels.
+    const float2 tx = make_float2(ddx.x * width, ddx.y * height);
+    const float2 ty = make_float2(ddy.x * width, ddy.y * height);
+    const float A = ty.x * ty.x + ty.y * ty.y;
+    const float B = -2.0f * (tx.x * ty.x + tx.y * ty.y);
+    const float C = tx.x * tx.x + tx.y * tx.y;
+    const float root = sqrtf(fmaxf((A - C) * (A - C) + B * B, 0.0f));
+    const float major2 = (A + C + root) * 0.5f;
+    const float minor2 = (A + C - root) * 0.5f;
+    int taps = 1;
+    const bool coarsest = numMipLevels > 1 && ml >= (float)(numMipLevels - 1);
+    if (major2 > 1.0f && !coarsest) {
+        const float ratio = minor2 > 0.0f ? sqrtf(major2 / minor2) : maxAnisotropy;
+        taps = (int)fminf(fmaxf(floorf(ratio + 0.5f), 1.0f), fmaxf(maxAnisotropy, 1.0f));
+    }
+    // Spread the taps along the longer gradient
+    const float2 axis = C >= A ? ddx : ddy;
+
+    float4 result = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < taps; ++i) {
+        const float offset = (i + 0.5f) / taps - 0.5f;
+        const float u = s + axis.x * offset, v = t + axis.y * offset;
+        float4 tap = ::tex2DLod<float4>(texture, u, v, level);
+        if (ml > level)
+            tap = lerp4(tap, ::tex2DLod<float4>(texture, u, v, level + 1.0f), ml - level);
+        result = result + tap;
+    }
+    return result * (1.0f / taps);
 }
 }  // namespace detail
 
@@ -353,8 +383,8 @@ __device__ inline bool tex2DCubic(const DeviceContext& ctx, unsigned int texture
     const int texHeight = (int)sampler->height;
     const int numMipLevels = max((int)sampler->desc.numMipLevels, 1);
     const bool pointMips = sampler->desc.mipmapFilterMode == 0;
-    // The footprint is computed for 16:1 anisotropy, the OptiX Toolkit default, although the
-    // hardware takes a single tap. The hardware mip blend is not linear, so blend in software.
+    // The footprint is computed for 16:1 anisotropy, the OptiX Toolkit default. The hardware mip
+    // blend is not linear, so blend and take the anisotropic taps in software (sampleLinearMip).
     const float invAnisotropy = 1.0f / 16.0f;
 
     const float p1 = (ddx.x * texWidth) * (ddx.x * texWidth) + (ddx.y * texHeight) * (ddx.y * texHeight);
@@ -412,7 +442,8 @@ __device__ inline Sample tex2DCubic(const DeviceContext& ctx, unsigned int textu
 /// Gradient sample that selects the mip level in software, as the OptiX Toolkit's footprint does,
 /// and blends the two levels linearly in the fractional LOD. The hardware blend is
 /// clamp(0.5 + 1.25 (f - 0.5), 0, 1), which has no mixing within 0.1 of a level.
-/// maxAnisotropy is the anisotropy the footprint is computed for (1 is isotropic).
+/// maxAnisotropy is the anisotropy the footprint is computed for (1 is isotropic). An anisotropic
+/// footprint is filtered with up to maxAnisotropy taps along its major axis, like the hardware.
 __device__ inline bool tex2DGradLinearMip(const DeviceContext& ctx, unsigned int textureId, float s, float t,
                                           float2 ddx, float2 ddy, float maxAnisotropy, float4& result,
                                           float4 defaultColor = make_float4(1.0f, 0.0f, 1.0f, 0.0f)) {
