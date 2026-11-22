@@ -375,18 +375,18 @@ TEST_F( VmmSamplerTest, CascadeTextureIsExtendedBySampling )
     const DemandTexture& texture = loader_->createTexture( image, descriptor );
 
     // Seen from afar first: the tail serves, and the finer levels have no pages.
-    const std::vector<SamplePoint> far = gridPoints( 8, 0.0f, 1.0f, { 7.0f }, 1024 );
+    const std::vector<SamplePoint> farPoints = gridPoints( 8, 0.0f, 1.0f, { 7.0f }, 1024 );
     uint32_t                       passes = 0;
-    std::vector<SampleResult>      vmm    = sampleVmm( vmmLod_, texture.getId(), far, passes );
-    expectMatch( far, vmm, sampleNative( nativeLod_, native.get(), far ), filterTolerance );
+    std::vector<SampleResult>      vmm    = sampleVmm( vmmLod_, texture.getId(), farPoints, passes );
+    expectMatch( farPoints, vmm, sampleNative( nativeLod_, native.get(), farPoints ), filterTolerance );
     const uint32_t cascadeLevel = readTextureInfo( texture.getId() ).cascadeLevel;
     EXPECT_EQ( cascadeLevel, 4u );
 
     // Then close up: one more pass for the cascade, then the tiles.
-    const std::vector<SamplePoint> near = gridPoints( 8, 0.0f, 1.0f, { 0.0f, 1.5f }, 1024 );
-    vmm                                 = sampleVmm( vmmLod_, texture.getId(), near, passes );
+    const std::vector<SamplePoint> nearPoints = gridPoints( 8, 0.0f, 1.0f, { 0.0f, 1.5f }, 1024 );
+    vmm                                 = sampleVmm( vmmLod_, texture.getId(), nearPoints, passes );
     EXPECT_LE( passes, 3u );
-    expectMatch( near, vmm, sampleNative( nativeLod_, native.get(), near ), filterTolerance );
+    expectMatch( nearPoints, vmm, sampleNative( nativeLod_, native.get(), nearPoints ), filterTolerance );
     EXPECT_EQ( readTextureInfo( texture.getId() ).cascadeLevel, 0u );
 }
 
