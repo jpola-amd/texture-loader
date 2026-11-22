@@ -37,6 +37,16 @@ add_executable(texture_loader_tests
     RegistrationErrorTests.cpp
     TextureSamplingHarness.cpp
     TextureSamplingTests.cpp
+    ImageSourceAdapterTests.cpp
+    VmmDeviceTextureInfoTests.cpp
+    VmmPageSystemTests.cpp
+    VmmWhiteBlackTileTests.cpp
+    VmmStatisticsTests.cpp
+    VmmEvictionTests.cpp
+    VmmCascadeTests.cpp
+    VmmTextureTests.cpp
+    VmmRequestTests.cpp
+    VmmSamplerTests.cpp
 )
 
 target_include_directories(texture_loader_tests
@@ -54,6 +64,26 @@ target_link_libraries(texture_loader_tests
 )
 
 target_compile_definitions(texture_loader_tests PRIVATE __HIP_PLATFORM_AMD__ HIP_DEMAND_TEST_HOOKS)
+
+# The sampler tests launch device code from a code object beside the test executable, as the examples do.
+hip_add_executable(
+    TARGET vmm_sampler_test_kernel
+    SOURCES VmmSamplerTestKernels.hip
+    ARCHITECTURES ${HIP_ARCHITECTURES}
+    OPTIONS -O3 --std=c++17 -DHIP_ENABLE_WARP_SYNC_BUILTINS
+    INCLUDES ${PROJECT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/VmmSamplerTestTypes.h
+            ${PROJECT_SOURCE_DIR}/include/DemandLoading/VmmTextureSampling.h
+            ${PROJECT_SOURCE_DIR}/include/DemandLoading/DeviceContext.h
+)
+add_dependencies(texture_loader_tests vmm_sampler_test_kernel)
+add_custom_command(TARGET texture_loader_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_PROPERTY:vmm_sampler_test_kernel,HIP_CODE_OBJECT>
+        $<TARGET_FILE_DIR:texture_loader_tests>/vmm_sampler_test_kernel.co
+    COMMENT "Copying the sampler test kernel code object"
+    VERBATIM
+)
 
 if(USE_OIIO)
     target_compile_definitions(texture_loader_tests PRIVATE USE_OIIO)

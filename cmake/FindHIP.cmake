@@ -7,6 +7,8 @@ if(NOT DEFINED HIP_PATH)
         set(HIP_PATH $ENV{HIP_PATH} CACHE PATH "Path to HIP installation")
     elseif(WIN32)
         set(HIP_PATH "C:/Program Files/AMD/ROCm/6.4" CACHE PATH "Path to HIP installation")
+    elseif(DEFINED ENV{ROCM_PATH})
+        set(HIP_PATH $ENV{ROCM_PATH} CACHE PATH "Path to HIP installation")
     else()
         set(HIP_PATH "/opt/rocm" CACHE PATH "Path to HIP installation")
     endif()
@@ -61,6 +63,35 @@ find_library(HIP_COMGR_LIBRARY
     NO_DEFAULT_PATH
 )
 
+# Find the Windows runtime libraries that must be next to HIP executables.
+if(WIN32)
+    find_file(HIP_COMGR_RUNTIME_LIBRARY
+        NAMES amd_comgr.dll
+        PATHS ${HIP_BIN_DIR}
+        NO_DEFAULT_PATH
+    )
+    find_file(HIP_RUNTIME_LIBRARY
+        NAMES amdhip64_7.dll
+        PATHS ${HIP_BIN_DIR}
+        NO_DEFAULT_PATH
+    )
+    find_file(HIP_KPACK_RUNTIME_LIBRARY
+        NAMES rocm_kpack.dll
+        PATHS ${HIP_BIN_DIR}
+        NO_DEFAULT_PATH
+    )
+
+    set(HIP_RUNTIME_LIBRARIES
+        ${HIP_COMGR_RUNTIME_LIBRARY}
+        ${HIP_RUNTIME_LIBRARY}
+    )
+    if(HIP_KPACK_RUNTIME_LIBRARY AND EXISTS "${HIP_KPACK_RUNTIME_LIBRARY}")
+        list(APPEND HIP_RUNTIME_LIBRARIES ${HIP_KPACK_RUNTIME_LIBRARY})
+    else()
+        message(STATUS "Optional HIP runtime library rocm_kpack.dll not found in ${HIP_BIN_DIR}")
+    endif()
+endif()
+
 # Find compilers
 find_program(HIP_HIPCC_EXECUTABLE
     NAMES hipcc hipcc.bat
@@ -93,6 +124,15 @@ if(NOT HIP_COMGR_LIBRARY)
     message(FATAL_ERROR "HIP code object manager library (amd_comgr) not found in ${HIP_LIB_DIR}. Searched for: amd_comgr_2, amd_comgr${HIP_VERSION_STRING}, amd_comgr")
 endif()
 
+if(WIN32)
+    if(NOT HIP_COMGR_RUNTIME_LIBRARY)
+        message(FATAL_ERROR "HIP runtime library amd_comgr.dll not found in ${HIP_BIN_DIR}")
+    endif()
+    if(NOT HIP_RUNTIME_LIBRARY)
+        message(FATAL_ERROR "HIP runtime library amdhip64_7.dll not found in ${HIP_BIN_DIR}")
+    endif()
+endif()
+
 if(NOT HIP_HIPCC_EXECUTABLE)
     message(FATAL_ERROR "hipcc compiler not found in ${HIP_BIN_DIR}")
 endif()
@@ -107,6 +147,9 @@ endif()
 message(STATUS "Found HIP: ${HIP_PATH}")
 message(STATUS "Include: ${HIP_INCLUDE_DIR}")
 message(STATUS "Libraries: ${HIP_LIBRARY}, ${HIP_COMGR_LIBRARY}")
+if(WIN32)
+    message(STATUS "Runtime libraries: ${HIP_RUNTIME_LIBRARIES}")
+endif()
 message(STATUS "Compiler:\n  -- hipcc: ${HIP_HIPCC_EXECUTABLE}\n  -- clang: ${HIP_CLANG_EXECUTABLE}")
 message(STATUS "Device libs: ${HIP_DEVICE_LIB_PATH}")
 
@@ -163,7 +206,7 @@ endif()
 function(hip_add_executable)
     set(options "")
     set(oneValueArgs TARGET)
-    set(multiValueArgs SOURCES ARCHITECTURES OPTIONS INCLUDES)
+    set(multiValueArgs SOURCES ARCHITECTURES OPTIONS INCLUDES DEPENDS)
     cmake_parse_arguments(HIP "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
     
     if(NOT HIP_TARGET)
@@ -210,7 +253,7 @@ function(hip_add_executable)
             ${HIP_SOURCES}
             ${ROCM_DEVICE_LIB_PATH_OPTION}
             -o ${OUTPUT_FILE}
-        DEPENDS ${HIP_SOURCES}
+        DEPENDS ${HIP_SOURCES} ${HIP_DEPENDS}
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "Compiling HIP device code: ${HIP_TARGET}"
         VERBATIM
