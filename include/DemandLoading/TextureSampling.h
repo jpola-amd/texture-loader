@@ -6,6 +6,7 @@
 ///       Must be compiled with HIP compiler (hipcc) for device code.
 
 #include "DemandLoading/DeviceContext.h"
+#include "DemandLoading/LinearMipFootprint.h"
 #include "ShaderUtil/TextureUtil.h"
 
 #if !defined(HIP_ENABLE_WARP_SYNC_BUILTINS)
@@ -323,33 +324,12 @@ __device__ __forceinline__ float4 lerp4(float4 a, float4 b, float w) {
 __device__ __forceinline__ float4 sampleLinearMip(hipTextureObject_t texture, int width, int height,
                                                   int numMipLevels, bool pointMips, float s, float t,
                                                   float2 ddx, float2 ddy, float maxAnisotropy) {
-    float ml = getMipLevel(ddx, ddy, width, height, 1.0f / maxAnisotropy);
-    if (pointMips)
-        ml = ceilf(ml - 0.5f);
-    ml = fminf(fmaxf(ml, 0.0f), (float)(numMipLevels - 1));
+    const LinearMipFootprint footprint =
+        selectLinearMipFootprint(width, height, numMipLevels, pointMips, ddx, ddy, maxAnisotropy);
+    const float ml = footprint.mipLevel;
     const float level = floorf(ml);
-
-    // Taps: the major to minor ratio of the footprint ellipse, rounded and at most maxAnisotropy.
-    // Rounding (not ceil) matches the CUDA hardware best on Arnold's testsuite: a mildly
-    // anisotropic footprint keeps one tap. One tap when the footprint is within a texel, or at the
-    // coarsest level of a mip chain, where the taps would read the same texels. A texture without
-    // mips counts as that level: one sample is what matches Arnold's CUDA references.
-    const float2 tx = make_float2(ddx.x * width, ddx.y * height);
-    const float2 ty = make_float2(ddy.x * width, ddy.y * height);
-    const float A = ty.x * ty.x + ty.y * ty.y;
-    const float B = -2.0f * (tx.x * ty.x + tx.y * ty.y);
-    const float C = tx.x * tx.x + tx.y * tx.y;
-    const float root = sqrtf(fmaxf((A - C) * (A - C) + B * B, 0.0f));
-    const float major2 = (A + C + root) * 0.5f;
-    const float minor2 = (A + C - root) * 0.5f;
-    int taps = 1;
-    const bool coarsest = ml >= (float)(numMipLevels - 1);
-    if (major2 > 1.0f && !coarsest) {
-        const float ratio = minor2 > 0.0f ? sqrtf(major2 / minor2) : maxAnisotropy;
-        taps = (int)fminf(fmaxf(floorf(ratio + 0.5f), 1.0f), fmaxf(maxAnisotropy, 1.0f));
-    }
-    // Spread the taps along the longer gradient
-    const float2 axis = C >= A ? ddx : ddy;
+    const int taps = footprint.taps;
+    const float2 axis = footprint.axis;
 
     float4 result = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
     for (int i = 0; i < taps; ++i) {

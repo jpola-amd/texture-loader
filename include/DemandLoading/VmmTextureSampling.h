@@ -2,6 +2,9 @@
 
 #include "VmmDeviceContext.h"
 #include "VmmDeviceUtils.h"
+#if defined( __HIPCC__ )
+#include "LinearMipFootprint.h"
+#endif
 #include <algorithm>
 #include <cmath>
 #include <hip/hip_fp16.h>
@@ -791,6 +794,56 @@ HIP_DEMAND_INLINE Sample tex2DGrad( const DeviceContext& context, uint32_t textu
     referenceTextureInfo( context, textureId );
     return sample;
 }
+
+#if defined( __HIPCC__ )
+/// tex2DGrad() with the mip level and the taps of hip_demand::tex2DGradLinearMip() (TextureSampling.h), so that a
+/// renderer gets the same filtering from both loaders: the level from the footprint's minor axis for maxAnisotropy,
+/// that many taps at most along the longer gradient, and one tap in a texture without mips. maxAnisotropy is the
+/// caller's; the texture's own is not used. Requires normalized coordinates.
+template <class Sample>
+HIP_DEMAND_INLINE Sample tex2DGradLinearMip( const DeviceContext& context,
+                                             uint32_t             textureId,
+                                             float                x,
+                                             float                y,
+                                             float2               ddx,
+                                             float2               ddy,
+                                             float                maxAnisotropy,
+                                             bool&                resident )
+{
+    resident = true;
+    if( textureId >= context.textureInfos.len )
+        return Sample{};
+
+    const TextureMetadata metadata = loadTextureMetadata( context, textureId, resident );
+    if( !resident )
+        return Sample{};
+
+    const bool pointMips = metadata.info.mipmapFilterMode() == hipFilterModePoint;
+    const ::hip_demand::detail::LinearMipFootprint footprint = ::hip_demand::detail::selectLinearMipFootprint(
+        static_cast<int>( metadata.info.width ), static_cast<int>( metadata.info.height ),
+        static_cast<int>( metadata.info.mipCount() ), pointMips, ddx, ddy, maxAnisotropy );
+
+    Sample sample{};
+    if( footprint.taps == 1 )
+        sample = sampleTexture<Sample>( context, metadata, x, y, footprint.mipLevel, resident );
+    else
+    {
+        // Every tap is taken, also after one missed its pages: each records what it needs.
+        const float tapScale = 1.0f / static_cast<float>( footprint.taps );
+        for( int i = 0; i < footprint.taps; ++i )
+        {
+            const float offset      = ( static_cast<float>( i ) + 0.5f ) * tapScale - 0.5f;
+            bool        tapResident = false;
+            sample += sampleTextureNoInline<Sample>( context, metadata, x + footprint.axis.x * offset,
+                                                     y + footprint.axis.y * offset, footprint.mipLevel, tapResident );
+            resident = resident && tapResident;
+        }
+        sample = sample * tapScale;
+    }
+    referenceTextureInfo( context, textureId );
+    return sample;
+}
+#endif
 
 template <class Sample>
 HIP_DEMAND_INLINE Sample tex2DGradUdim( const DeviceContext& context,

@@ -125,6 +125,8 @@ class VmmSamplerTest : public VmmLoaderTest
         ASSERT_EQ( hipModuleGetFunction( &vmmUdim_, module_, "sampleVmmUdim" ), hipSuccess );
         ASSERT_EQ( hipModuleGetFunction( &nativeLod_, module_, "sampleNativeLod" ), hipSuccess );
         ASSERT_EQ( hipModuleGetFunction( &nativeGrad_, module_, "sampleNativeGrad" ), hipSuccess );
+        ASSERT_EQ( hipModuleGetFunction( &vmmGradLinearMip_, module_, "sampleVmmGradLinearMip" ), hipSuccess );
+        ASSERT_EQ( hipModuleGetFunction( &nativeGradLinearMip_, module_, "sampleNativeGradLinearMip" ), hipSuccess );
     }
 
     void TearDown() override
@@ -260,6 +262,8 @@ class VmmSamplerTest : public VmmLoaderTest
     hipFunction_t vmmUdim_    = nullptr;
     hipFunction_t nativeLod_  = nullptr;
     hipFunction_t nativeGrad_ = nullptr;
+    hipFunction_t vmmGradLinearMip_    = nullptr;
+    hipFunction_t nativeGradLinearMip_ = nullptr;
 };
 
 // Hardware filtering weights have 8 fractional bits; a level blend compounds two of them.
@@ -308,6 +312,35 @@ TEST_F( VmmSamplerTest, Tex2DGradMatchesTheNativeTexture )
     const std::vector<SampleResult> vmm    = sampleVmm( vmmGrad_, texture.getId(), points, passes );
     EXPECT_LE( passes, 3u );
     const std::vector<SampleResult> expected = sampleNative( nativeGrad_, native.get(), points );
+    expectMatch( points, vmm, expected, filterTolerance );
+}
+
+TEST_F( VmmSamplerTest, Tex2DGradLinearMipMatchesTheHardwareTextureLoader )
+{
+    createLoader( defaultOptions() );
+    const auto image = std::make_shared<TestImage>( 1024, 1024, 11, TestImage::Pattern::Noise, 0, 4 );
+    NativeTexture native( *image, hipAddressModeClamp );
+
+    TextureDescriptor descriptor{};
+    descriptor.addressMode[0] = hipAddressModeClamp;
+    descriptor.addressMode[1] = hipAddressModeClamp;
+    const DemandTexture& texture = loader_->createTexture( image, descriptor );
+
+    // Fractional levels, where both samplers blend two levels linearly, and whole ones.
+    std::vector<SamplePoint> points = gridPoints( 24, 0.0f, 1.0f, { 0.0f, 0.5f, 1.3f, 1.75f, 2.0f, 4.6f, 7.0f, 10.0f }, 1024 );
+    // Stretch every other footprint along x or y: 4 and 20 times, for 4 taps and for the limit of 16.
+    for( size_t i = 0; i < points.size(); i += 2 )
+    {
+        const float stretch = ( i % 4 == 0 ) ? 4.0f : 20.0f;
+        float2&     axis    = ( i % 8 < 4 ) ? points[i].ddx : points[i].ddy;
+        axis.x *= stretch;
+        axis.y *= stretch;
+    }
+
+    uint32_t                        passes = 0;
+    const std::vector<SampleResult> vmm    = sampleVmm( vmmGradLinearMip_, texture.getId(), points, passes );
+    EXPECT_LE( passes, 3u );
+    const std::vector<SampleResult> expected = sampleNative( nativeGradLinearMip_, native.get(), points );
     expectMatch( points, vmm, expected, filterTolerance );
 }
 
