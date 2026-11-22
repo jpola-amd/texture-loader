@@ -332,7 +332,8 @@ __device__ __forceinline__ float4 sampleLinearMip(hipTextureObject_t texture, in
     // Taps: the major to minor ratio of the footprint ellipse, rounded and at most maxAnisotropy.
     // Rounding (not ceil) matches the CUDA hardware best on Arnold's testsuite: a mildly
     // anisotropic footprint keeps one tap. One tap when the footprint is within a texel, or at the
-    // coarsest level of a mip chain, where the taps would read the same texels.
+    // coarsest level of a mip chain, where the taps would read the same texels. A texture without
+    // mips counts as that level: one sample is what matches Arnold's CUDA references.
     const float2 tx = make_float2(ddx.x * width, ddx.y * height);
     const float2 ty = make_float2(ddy.x * width, ddy.y * height);
     const float A = ty.x * ty.x + ty.y * ty.y;
@@ -342,7 +343,7 @@ __device__ __forceinline__ float4 sampleLinearMip(hipTextureObject_t texture, in
     const float major2 = (A + C + root) * 0.5f;
     const float minor2 = (A + C - root) * 0.5f;
     int taps = 1;
-    const bool coarsest = numMipLevels > 1 && ml >= (float)(numMipLevels - 1);
+    const bool coarsest = ml >= (float)(numMipLevels - 1);
     if (major2 > 1.0f && !coarsest) {
         const float ratio = minor2 > 0.0f ? sqrtf(major2 / minor2) : maxAnisotropy;
         taps = (int)fminf(fmaxf(floorf(ratio + 0.5f), 1.0f), fmaxf(maxAnisotropy, 1.0f));

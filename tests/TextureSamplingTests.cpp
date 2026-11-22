@@ -1172,13 +1172,19 @@ TEST_F(TextureSamplingTest, LinearMipAveragesAnisotropicTapsAlongTheMajorAxis) {
     source->pixels.resize(texels.size() * sizeof(float));
     std::memcpy(source->pixels.data(), texels.data(), source->pixels.size());
 
+    // The taps need a mip chain: a texture without mips reads one sample (see below)
     TextureDesc desc;
-    desc.generateMipmaps = false;
+    desc.generateMipmaps = true;
     desc.filterMode = hipFilterModeLinear;
     desc.addressMode[0] = desc.addressMode[1] = hipAddressModeClamp;
     TextureHandle handle;
     hipTextureObject_t texture{};
     ASSERT_NO_FATAL_FAILURE(requestAndLoad(source, desc, handle, texture));
+    TextureDesc singleLevelDesc = desc;
+    singleLevelDesc.generateMipmaps = false;
+    TextureHandle singleLevel;
+    ASSERT_NO_FATAL_FAILURE(requestAndLoad(std::make_shared<TypedImageSource>(*source), singleLevelDesc,
+                                           singleLevel, texture));
 
     // The centre of texel 4 (value 0)
     const float u = 4.5f / size, v = 4.5f / size;
@@ -1188,7 +1194,8 @@ TEST_F(TextureSamplingTest, LinearMipAveragesAnisotropicTapsAlongTheMajorAxis) {
     anisotropic.ddx = {4.f / size, 0};
     anisotropic.ddy = {0, 1.f / size};
     inputs.push_back(anisotropic);
-    // The same footprint with maxAnisotropy 1 takes one tap, on texel 4
+    // With maxAnisotropy 1 the level covers the major axis instead: one tap on level 2, where the
+    // stripes have averaged out
     auto isotropicLimit = anisotropic;
     isotropicLimit.lod = 1.f;
     inputs.push_back(isotropicLimit);
@@ -1200,15 +1207,20 @@ TEST_F(TextureSamplingTest, LinearMipAveragesAnisotropicTapsAlongTheMajorAxis) {
     auto mild = anisotropic;
     mild.ddx = {1.25f / size, 0};
     inputs.push_back(mild);
+    // Without mips the 4:1 footprint takes one tap
+    auto withoutMips = anisotropic;
+    withoutMips.textureId = singleLevel.id;
+    inputs.push_back(withoutMips);
 
     std::vector<SamplingResult> results;
     ASSERT_EQ(harness_.sample(loader_->getDeviceContext(), inputs, results), hipSuccess);
     ASSERT_EQ(results.size(), inputs.size());
     const float tolerance = 1.f / 64;
     expectSample(results[0], {.5f, .5f, .5f, .5f}, {tolerance, tolerance, tolerance, tolerance});
-    expectSample(results[1], {0, 0, 0, 0}, {tolerance, tolerance, tolerance, tolerance});
+    expectSample(results[1], {.5f, .5f, .5f, .5f}, {tolerance, tolerance, tolerance, tolerance});
     expectSample(results[2], {0, 0, 0, 0}, {tolerance, tolerance, tolerance, tolerance});
     expectSample(results[3], {0, 0, 0, 0}, {tolerance, tolerance, tolerance, tolerance});
+    expectSample(results[4], {0, 0, 0, 0}, {tolerance, tolerance, tolerance, tolerance});
 }
 
 TEST_F(SamplingHarnessDeviceTest, GetMipLevelMatchesOptixToolkitFootprint) {
