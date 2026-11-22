@@ -75,6 +75,7 @@ hip_add_executable(
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/VmmSamplerTestTypes.h
             ${PROJECT_SOURCE_DIR}/include/DemandLoading/VmmTextureSampling.h
             ${PROJECT_SOURCE_DIR}/include/DemandLoading/DeviceContext.h
+            ${PROJECT_SOURCE_DIR}/include/DemandLoading/VmmDeviceContext.h
 )
 add_dependencies(texture_loader_tests vmm_sampler_test_kernel)
 add_custom_command(TARGET texture_loader_tests POST_BUILD

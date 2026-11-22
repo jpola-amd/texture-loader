@@ -267,6 +267,7 @@ if(USE_OIIO)
 
     set(VMM_DEVICE_DEPS
         ${PROJECT_SOURCE_DIR}/include/DemandLoading/DeviceContext.h
+        ${PROJECT_SOURCE_DIR}/include/DemandLoading/VmmDeviceContext.h
         ${PROJECT_SOURCE_DIR}/include/DemandLoading/VmmDeviceUtils.h
         ${PROJECT_SOURCE_DIR}/include/DemandLoading/VmmTextureSampling.h
     )

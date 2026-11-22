@@ -1,4 +1,4 @@
-#include <DemandLoading/DeviceContext.h>
+#include <DemandLoading/VmmDeviceContext.h>
 #include <DemandLoading/VmmDeviceUtils.h>
 #include "Lru.h"
 #include <cstdint>

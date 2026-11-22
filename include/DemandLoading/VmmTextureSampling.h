@@ -1,6 +1,6 @@
 #pragma once
 
-#include "DeviceContext.h"
+#include "VmmDeviceContext.h"
 #include "VmmDeviceUtils.h"
 #include <algorithm>
 #include <cmath>

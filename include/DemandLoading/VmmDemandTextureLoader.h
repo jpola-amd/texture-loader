@@ -1,6 +1,6 @@
 #pragma once
 
-#include <DemandLoading/DeviceContext.h>
+#include <DemandLoading/VmmDeviceContext.h>
 #include <ImageSource/ImageSource.h>
 #include <cstdint>
 #include <filesystem>

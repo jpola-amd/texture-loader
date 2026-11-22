@@ -5,6 +5,7 @@
 
 #include "HipCheck.h"
 #include <DemandLoading/DeviceContext.h>
+#include <DemandLoading/VmmDeviceContext.h>
 #include <array>
 #include <cassert>
 #include <cstdint>

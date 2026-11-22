@@ -1,5 +1,5 @@
 #pragma once
-#include <DemandLoading/DeviceContext.h>
+#include <DemandLoading/VmmDeviceContext.h>
 
 namespace hip_demand::vmm {
 

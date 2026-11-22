@@ -3,7 +3,7 @@
 
 #include <gtest/gtest.h>
 #include <hip/hip_runtime.h>
-#include <DemandLoading/DeviceContext.h>
+#include <DemandLoading/VmmDeviceContext.h>
 
 namespace hip_demand::vmm::test {
 

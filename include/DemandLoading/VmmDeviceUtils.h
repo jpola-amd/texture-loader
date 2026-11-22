@@ -1,6 +1,6 @@
 #pragma once
 
-#include "DeviceContext.h"
+#include "VmmDeviceContext.h"
 
 
 namespace hip_demand::vmm {

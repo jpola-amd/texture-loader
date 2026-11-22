@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../Internal/Utils.h"
-#include <DemandLoading/DeviceContext.h>
+#include <DemandLoading/VmmDeviceContext.h>
 #include <cstdint>
 #include <hip/hip_runtime.h>
 #include <mutex>

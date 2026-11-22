@@ -3,7 +3,7 @@
 #include "../Internal/HipCheck.h"
 #include "../Internal/Utils.h"
 #include "HipEventPool.h"
-#include <DemandLoading/DeviceContext.h>
+#include <DemandLoading/VmmDeviceContext.h>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
