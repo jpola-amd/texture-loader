@@ -21,6 +21,9 @@ struct TextureDescriptor
     unsigned int maxAnisotropy = 1;
 };
 
+// Declared here, so that the names in Ticket mean this class also where hip_demand::TicketImpl of Ticket.h is visible.
+class TicketImpl;
+
 class Ticket
 {
   public:
@@ -30,7 +33,7 @@ class Ticket
     void wait( hipEvent_t* event = nullptr );
 
   private:
-    std::shared_ptr<class TicketImpl> impl_;
+    std::shared_ptr<TicketImpl> impl_;
     friend class TicketImpl;
     Ticket( std::shared_ptr<TicketImpl>&& impl )
         : impl_( std::move( impl ) )
