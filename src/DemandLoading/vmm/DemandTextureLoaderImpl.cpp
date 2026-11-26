@@ -166,6 +166,9 @@ DemandTextureLoaderImpl::DemandTextureLoaderImpl( const Options& options )
     , uploadPool_( requestProcessor_.threadCount() * 3 )
     , bits_( resourceTable_.count() )
 {
+    // Before the first pass has planned, preloadTextures() may map up to the budget.
+    if( options_.maxPhysicalPages != ~0u )
+        mapAllowance_.store( options_.maxPhysicalPages );
 }
 
 void DemandTextureLoaderImpl::init()
@@ -307,6 +310,14 @@ void DemandTextureLoaderImpl::setUdimFields( DeviceTextureInfo& info, const Dema
 void DemandTextureLoaderImpl::launchPrepare( hipStream_t stream, DeviceContext& deviceContext )
 {
     std::lock_guard lock( mutex_ );
+
+    const uint32_t textureCount = static_cast<uint32_t>( textures_.size() );
+    if( options_.preloadTextures && preloadedTextureCount_ < textureCount )
+    {
+        const uint32_t firstTexture = preloadedTextureCount_;
+        preloadedTextureCount_      = textureCount;
+        preloadTextures( stream, firstTexture, textureCount );
+    }
 
     deviceContext              = deviceContext_;
     deviceContext.textureInfos = deviceContext.textureInfos.subspan( 0, textures_.size() );
@@ -492,6 +503,76 @@ void DemandTextureLoaderImpl::endLoading( uint32_t resourceId, bool resident )
     std::lock_guard lock( bits_.mutex );
     bits_.residence.set( resourceId, resident );
     bits_.loading.set( resourceId, false );
+}
+
+// Loads the metadata and the mip tail of the textures created since the last launchPrepare(), which calls this with
+// mutex_ held, and publishes them to the device, so that the next launch finds them resident.
+void DemandTextureLoaderImpl::preloadTextures( hipStream_t stream, uint32_t firstTexture, uint32_t endTexture )
+{
+    std::vector<uint32_t> loaded;
+    loaded.reserve( 2 * static_cast<size_t>( endTexture - firstTexture ) );
+
+    // A resource that fails here is not resident: a launch that samples its texture requests it, and a worker tries again.
+    const auto load = [&]( uint32_t resourceId, auto&& process ) {
+        if( !beginLoading( resourceId ) )
+            return false;
+
+        bool resident = false;
+        try
+        {
+            resident = process();
+        }
+        catch( const std::exception& e )
+        {
+            reportOnce( resourceId, e.what() );
+        }
+        endLoading( resourceId, resident );
+        if( resident )
+            loaded.push_back( resourceId );
+        return resident;
+    };
+
+    for( uint32_t textureId = firstTexture; textureId < endTexture; ++textureId )
+    {
+        DemandTextureImpl& texture = *textures_[textureId];
+        if( !load( resourceTable_.textureInfos.getResourceId( textureId ), [&] {
+                processTextureInfo( stream, texture );
+                return true;
+            } ) )
+            continue;
+
+        // An empty UDIM cell and a texture without a level that fits in a page have no mip tail.
+        const uint32_t mipTailPage = textureInfo( texture ).mipTailPage;
+        if( mipTailPage == INVALID_PAGE )
+            continue;
+
+        load( resourceTable_.textureTiles.getResourceId( mipTailPage ), [&] {
+            // Without room in the budget the mip tail waits for a request, which can evict for it.
+            if( !acquirePage() )
+                return false;
+            try
+            {
+                processMipTail( stream, texture, mipTailPage );
+            }
+            catch( ... )
+            {
+                releasePage();
+                throw;
+            }
+            notePagesInUse();
+            return true;
+        } );
+    }
+
+    // The device's list takes maxRequests resources at a time.
+    const size_t chunkSize = deviceContext_.processedResources.len;
+    for( size_t first = 0; first < loaded.size(); first += chunkSize )
+    {
+        const uint32_t count  = static_cast<uint32_t>( std::min( chunkSize, loaded.size() - first ) );
+        auto           upload = uploadPool_.acquire<uint32_t>( chunkSize, stream );
+        std::copy_n( loaded.data() + first, count, upload.span().ptr );
+        publishResources( stream, upload.span(), count );
+    }
 }
 
 void DemandTextureLoaderImpl::processRequest( hipStream_t stream, uint32_t resourceId )

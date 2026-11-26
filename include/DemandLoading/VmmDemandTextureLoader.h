@@ -81,6 +81,14 @@ struct Options
 
     /// Backs all white and all black tiles with one shared physical page per texel value.
     bool coalesceWhiteBlackTiles = false;
+
+    /// Loads a texture's metadata and mip tail at the first launchPrepare() after its creation, on the caller's
+    /// thread and stream, which opens its image. The first launch that samples the texture then finds a sample in
+    /// the mip tail resident and asks for the tiles of a finer one at once; otherwise it spends one pass on the
+    /// metadata before it can ask for either. The mip tail takes one page of maxPhysicalPages and is evicted like
+    /// a tile; one that the budget has no room for is loaded when a launch requests it.
+    /// False: an image is opened only when a launch samples its texture.
+    bool preloadTextures = false;
 };
 
 struct Statistics
