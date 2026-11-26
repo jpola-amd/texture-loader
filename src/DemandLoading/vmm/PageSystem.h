@@ -56,6 +56,10 @@ class PageSystem : NonCopyble
     uint32_t physicalPageCount() const;
     uint32_t mappedPageCount() const;
     uint32_t unmappedPageCount() const;
+    /// Physical pages that back a mapping: the allocated ones without those kept free for reuse.
+    uint32_t pagesInUse() const;
+    /// pagesInUse() as it will be once the enqueued evictions are applied, which happens with the next mapping.
+    uint32_t pagesInUseAfterEvictions() const;
 
     /// Makes the device pick up changed page mappings. On Linux, ROCm's hipMemMap()/hipMemUnmap() do not invalidate
     /// the GPU TLB (the amdgpu kernel driver skips it, see ROCm/rocm-systems#13106), so a virtual page that is unmapped

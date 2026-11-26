@@ -1,5 +1,6 @@
 #include "RequestProcessor.h"
 #include "DemandTextureLoaderImpl.h"
+#include <DemandLoading/Logging.h>
 
 namespace hip_demand::vmm {
 
@@ -79,7 +80,7 @@ void RequestProcessor::workerLoop()
     }
     catch( const std::exception& e )
     {
-        std::cerr << "Error: " << e.what() << std::endl;
+        logMessage( LogLevel::Error, "vmm loader: a request worker stopped: %s", e.what() );
     }
 }
 

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Tests for the VMM loader's eviction of tile pages (Options::enableEviction).
+// Tests for the VMM loader's memory budget (Options::maxPhysicalPages): the eviction of tile pages that keeps to it,
+// what happens when the tiles a launch reads do not fit, and tiles that cannot be read.
 
 #include "VmmLoaderTestUtils.h"
 #include <DemandLoading/vmm/Lru.h>
@@ -10,155 +11,231 @@ namespace {
 
 constexpr size_t pageBytes = PageSystem::PAGE_BYTES;
 
+// An image whose tiles cannot be read.
+class UnreadableImage : public TestImage
+{
+  public:
+    using TestImage::TestImage;
+    bool readTile( char*, unsigned int, const Tile&, hipStream_t ) override { return false; }
+};
+
 class VmmEvictionTest : public VmmLoaderTest
 {
   protected:
-    static Options evictionOptions( bool coalesceWhiteBlackTiles = false )
+    static Options evictionOptions( uint32_t budgetPages, bool coalesceWhiteBlackTiles = false )
     {
         Options options                 = defaultOptions();
+        options.maxPhysicalPages        = budgetPages;
         options.enableEviction          = true;
         options.maxEvictedPages         = 64;
         options.coalesceWhiteBlackTiles = coalesceWhiteBlackTiles;
         return options;
     }
 
-    bool allNonResident( const std::vector<uint32_t>& pageIds )
+    uint32_t residentCount( const std::vector<uint32_t>& pageIds )
     {
-        return std::none_of( pageIds.begin(), pageIds.end(), [&]( uint32_t pageId ) { return isResident( pageId ); } );
+        return static_cast<uint32_t>( std::count_if( pageIds.begin(), pageIds.end(), [&]( uint32_t pageId ) { return isResident( pageId ); } ) );
     }
 
-    // Runs passes that reference only the given resources until the pages are non-resident on the device, or maxPasses.
-    // The LRU counter of a tile unreferenced for a pass grows to the eviction threshold in a few passes, the next pass
-    // clears its residence bit and the one after that hands the page to the page system.
-    uint32_t agePages( const std::vector<uint32_t>& pageIds, const std::vector<uint32_t>& referencedResources = {}, uint32_t maxPasses = 12 )
+    std::vector<uint32_t> resourceIds( const std::vector<uint32_t>& pageIds ) const
     {
-        for( uint32_t pass = 1; pass <= maxPasses; ++pass )
-        {
-            requestResources( referencedResources );
-            if( allNonResident( pageIds ) )
-                return pass;
-        }
-        return maxPasses + 1;
+        std::vector<uint32_t> ids;
+        for( uint32_t pageId : pageIds )
+            ids.push_back( pageResourceId( pageId ) );
+        return ids;
     }
+
+    // A 1024x1024 texture of 16 tiles, all loaded.
+    std::vector<uint32_t> loadSixteenTiles( uint8_t value = 0xAA )
+    {
+        image_                      = std::make_shared<TestImage>( 1024, 1024, 1, true, value );
+        const DemandTexture& texture = loader_->createTexture( image_, TextureDescriptor{} );
+        info_                       = loadTextureInfo( texture );
+        std::vector<uint32_t> pages = loadLevel0( info_ );
+        EXPECT_EQ( pages.size(), 16u );
+        EXPECT_EQ( residentCount( pages ), 16u );
+        return pages;
+    }
+
+    // A 256x256 texture, one page, with its metadata loaded. Returns its page.
+    uint32_t createOnePageTexture( uint8_t value )
+    {
+        const DemandTexture&    texture = loader_->createTexture( std::make_shared<TestImage>( 256, 256, 1, true, value ), TextureDescriptor{} );
+        const DeviceTextureInfo info    = loadTextureInfo( texture );
+        return tilePageId( info, 0, 0, 0 );
+    }
+
+    std::shared_ptr<TestImage> image_;
+    DeviceTextureInfo          info_{};
 };
 
 }  // namespace
 
-TEST_F( VmmEvictionTest, UnreferencedTilesAreEvicted )
+TEST_F( VmmEvictionTest, NothingIsEvictedWhileTheBudgetHasRoom )
 {
-    createLoader( evictionOptions() );
+    createLoader( evictionOptions( 4096 ) );
     EXPECT_NE( context_.lru.ptr, nullptr );
     EXPECT_EQ( context_.evictionCandidates.len, 64u );
     EXPECT_TRUE( context_.requestIfResident );
 
-    const auto                  image   = std::make_shared<TestImage>( 1024, 1024, 1, true, 0xAA );
-    const DemandTexture&        texture = loader_->createTexture( image, TextureDescriptor{} );
-    const std::vector<uint32_t> pages   = loadLevel0( loadTextureInfo( texture ) );
-    ASSERT_EQ( pages.size(), 16u );
+    const std::vector<uint32_t> pages = loadSixteenTiles();
     for( uint32_t pageId : pages )
         EXPECT_EQ( lruValue( pageId ), 0u ) << "page " << pageId;
 
-    // One pass without references: every tile's LRU counter leaves zero, none is a candidate yet.
-    runPass();
+    for( uint32_t pass = 0; pass < 8; ++pass )
+        runPass();
     for( uint32_t pageId : pages )
     {
-        EXPECT_EQ( lruValue( pageId ), 1u ) << "page " << pageId;
+        EXPECT_GE( lruValue( pageId ), 1u ) << "page " << pageId;
         EXPECT_TRUE( isResident( pageId ) ) << "page " << pageId;
     }
-
-    const uint32_t passes = agePages( pages );
-    EXPECT_LE( passes, 8u );
-    EXPECT_TRUE( allNonResident( pages ) );
-
-    // The pages are unmapped when the page system next maps one, and were released, as no pass that handed them over
-    // requested anything to reuse them for.
-    EXPECT_EQ( loader_->getStatistics().numEvictions, 0u );
-    const DemandTexture&        other      = loader_->createTexture( std::make_shared<TestImage>( 256, 256, 1, true, 0xBB ), TextureDescriptor{} );
-    const std::vector<uint32_t> otherPages = loadLevel0( loadTextureInfo( other ) );
-    ASSERT_EQ( otherPages.size(), 1u );
     const Statistics stats = loader_->getStatistics();
-    EXPECT_EQ( stats.numEvictions, 16u );
-    EXPECT_EQ( impl_->physicalPageCount(), 1u );
-    EXPECT_EQ( pageValue( otherPages[0] ), 0xBB );
+    EXPECT_EQ( stats.numEvictions, 0u );
+    EXPECT_EQ( stats.numDeniedRequests, 0u );
+    EXPECT_EQ( stats.residentTileBytes, 16 * pageBytes );
 }
 
-TEST_F( VmmEvictionTest, ReferencedTilesStayResident )
+TEST_F( VmmEvictionTest, AnUnreadTileMakesRoomForARequest )
 {
-    createLoader( evictionOptions() );
-    const DemandTexture&        texture = loader_->createTexture( std::make_shared<TestImage>( 1024, 1024, 1, true, 0xAA ), TextureDescriptor{} );
-    const std::vector<uint32_t> pages   = loadLevel0( loadTextureInfo( texture ) );
-    ASSERT_EQ( pages.size(), 16u );
+    createLoader( evictionOptions( 16 ) );
+    const std::vector<uint32_t> pages     = loadSixteenTiles();
+    const uint32_t              otherPage = createOnePageTexture( 0xBB );
+    EXPECT_EQ( residentCount( pages ), 16u ) << "a pass with room evicts nothing";
 
-    const std::vector<uint32_t> kept{ pages[0], pages[5] };
-    const std::vector<uint32_t> rest( pages.begin() + 1, pages.begin() + 5 );
-    agePages( rest, { pageResourceId( kept[0] ), pageResourceId( kept[1] ) } );
+    // The budget is full. The pass picks a victim among the tiles its launch did not read and puts the request off.
+    requestResources( { pageResourceId( otherPage ) } );
+    EXPECT_FALSE( isResident( otherPage ) );
+    EXPECT_EQ( residentCount( pages ), 16u ) << "the victim stays resident until the next launch is prepared";
+    EXPECT_EQ( loader_->getStatistics().numDeniedRequests, 1u );
+    EXPECT_FALSE( loader_->getStatistics().budgetExhausted );
 
-    for( uint32_t pageId : kept )
-    {
-        EXPECT_TRUE( isResident( pageId ) ) << "page " << pageId;
+    // The next pass finds the victim gone and its page free.
+    requestResources( { pageResourceId( otherPage ) } );
+    EXPECT_TRUE( isResident( otherPage ) );
+    EXPECT_EQ( pageValue( otherPage ), 0xBB );
+    EXPECT_EQ( residentCount( pages ), 15u );
+
+    const Statistics stats = loader_->getStatistics();
+    EXPECT_EQ( stats.numEvictions, 1u );
+    EXPECT_EQ( stats.numDeniedRequests, 1u );
+    EXPECT_EQ( impl_->physicalPageCount(), 16u ) << "the evicted page was reused";
+    EXPECT_EQ( stats.residentTileBytes, 16 * pageBytes );
+    EXPECT_EQ( stats.peakResidentTileBytes, 16 * pageBytes );
+    EXPECT_EQ( stats.bytesTransferredToDevice, 17 * pageBytes );
+}
+
+TEST_F( VmmEvictionTest, TheTileUnreadForLongestGoesFirst )
+{
+    createLoader( evictionOptions( 16 ) );
+    const std::vector<uint32_t> pages     = loadSixteenTiles();
+    const uint32_t              otherPage = createOnePageTexture( 0xBB );
+
+    // The second half goes unread for some launches.
+    const std::vector<uint32_t> recent( pages.begin(), pages.begin() + 8 );
+    const std::vector<uint32_t> old( pages.begin() + 8, pages.end() );
+    for( uint32_t pass = 0; pass < 5; ++pass )
+        requestResources( resourceIds( recent ) );
+    for( uint32_t pageId : recent )
         EXPECT_EQ( lruValue( pageId ), 0u ) << "page " << pageId;
-    }
-    for( uint32_t pageId : pages )
-    {
-        if( pageId != kept[0] && pageId != kept[1] )
-            EXPECT_FALSE( isResident( pageId ) ) << "page " << pageId;
-    }
+    for( uint32_t pageId : old )
+        EXPECT_GE( lruValue( pageId ), 2u ) << "page " << pageId;
+
+    requestResources( { pageResourceId( otherPage ) } );
+    requestResources( { pageResourceId( otherPage ) } );
+    EXPECT_TRUE( isResident( otherPage ) );
+    EXPECT_EQ( residentCount( recent ), 8u );
+    EXPECT_EQ( residentCount( old ), 7u );
 }
 
 TEST_F( VmmEvictionTest, EvictedTilesAreReadAgainWhenRequested )
 {
-    createLoader( evictionOptions() );
-    const auto                  image   = std::make_shared<TestImage>( 1024, 1024, 1, true, 0xAA );
-    const DemandTexture&        texture = loader_->createTexture( image, TextureDescriptor{} );
-    const DeviceTextureInfo     info    = loadTextureInfo( texture );
-    const std::vector<uint32_t> pages   = loadLevel0( info );
-    EXPECT_EQ( image->getNumTilesRead(), 16u );
+    createLoader( evictionOptions( 16 ) );
+    const std::vector<uint32_t> pages     = loadSixteenTiles();
+    const uint32_t              otherPage = createOnePageTexture( 0xBB );
+    EXPECT_EQ( image_->getNumTilesRead(), 16u );
 
-    // Two passes without references: the tiles whose turn it is reach the eviction threshold and become candidates.
-    runPass();
-    runPass();
+    requestResources( { pageResourceId( otherPage ) } );
+    requestResources( { pageResourceId( otherPage ) } );
+    const auto evicted = std::find_if( pages.begin(), pages.end(), [&]( uint32_t pageId ) { return !isResident( pageId ); } );
+    ASSERT_NE( evicted, pages.end() );
 
-    // The pass that clears their residence bits hands them to the page system with its own request count as the
-    // number of pages to reuse: another texture's tiles, requested in that pass, take the evicted physical pages.
-    const auto                  otherImage = std::make_shared<TestImage>( 1024, 1024, 1, true, 0xBB );
-    const DemandTexture&        other      = loader_->createTexture( otherImage, TextureDescriptor{} );
-    const DeviceTextureInfo     otherInfo  = loadTextureInfo( other );
-    const std::vector<uint32_t> otherPages = loadLevel0( otherInfo );
-    EXPECT_EQ( otherImage->getNumTilesRead(), 16u );
-    const Statistics stats = loader_->getStatistics();
-    EXPECT_GT( stats.numEvictions, 0u );
-    EXPECT_EQ( impl_->physicalPageCount() + stats.numEvictions, 32u ) << "every evicted page was reused";
+    // The evicted tile comes back into its own page, for which another tile leaves.
+    requestUntilResident( { pageResourceId( *evicted ) } );
+    EXPECT_TRUE( isResident( *evicted ) );
+    EXPECT_EQ( pageValue( *evicted ), 0xAA );
+    EXPECT_EQ( image_->getNumTilesRead(), 17u );
+    EXPECT_EQ( loader_->getStatistics().numEvictions, 2u );
+    EXPECT_EQ( impl_->physicalPageCount(), 16u );
+}
 
-    agePages( pages );
-    EXPECT_TRUE( allNonResident( pages ) );
+TEST_F( VmmEvictionTest, TilesTheLaunchReadAreNotEvictedAndTheBudgetIsExceeded )
+{
+    createLoader( evictionOptions( 16 ) );
+    const std::vector<uint32_t> pages     = loadSixteenTiles();
+    const uint32_t              otherPage = createOnePageTexture( 0xBB );
 
-    // The evicted tiles are read again and land in their own pages, not in the ones the other texture now holds.
-    const std::vector<uint32_t> reloaded = loadLevel0( info );
-    EXPECT_EQ( reloaded, pages );
-    EXPECT_EQ( image->getNumTilesRead(), 32u );
-    EXPECT_EQ( loader_->getStatistics().numEvictions, 16u );
-    for( uint32_t pageId : pages )
-    {
-        EXPECT_TRUE( isResident( pageId ) ) << "page " << pageId;
-        EXPECT_EQ( pageValue( pageId ), 0xAA ) << "page " << pageId;
-    }
-    for( uint32_t pageId : otherPages )
-    {
-        EXPECT_TRUE( isResident( pageId ) ) << "page " << pageId;
-        EXPECT_EQ( pageValue( pageId ), 0xBB ) << "page " << pageId;
-    }
+    // The launch reads all sixteen tiles and asks for one more: nothing can go, so the tile is mapped beyond the budget.
+    std::vector<uint32_t> everything = resourceIds( pages );
+    everything.push_back( pageResourceId( otherPage ) );
+    requestResources( everything );
+    EXPECT_TRUE( isResident( otherPage ) );
+    EXPECT_EQ( residentCount( pages ), 16u );
+    Statistics stats = loader_->getStatistics();
+    EXPECT_EQ( stats.numDeniedRequests, 0u );
+    EXPECT_EQ( stats.numEvictions, 0u );
+    EXPECT_FALSE( stats.budgetExhausted );
+    EXPECT_EQ( stats.residentTileBytes, 17 * pageBytes );
+    EXPECT_EQ( stats.peakResidentTileBytes, 17 * pageBytes );
+
+    // Once the launch reads fewer tiles, the excess goes without a request asking for room.
+    requestResources( { pageResourceId( otherPage ) } );
+    requestResources( { pageResourceId( otherPage ) } );
+    EXPECT_TRUE( isResident( otherPage ) );
+    EXPECT_EQ( residentCount( pages ), 15u );
+}
+
+TEST_F( VmmEvictionTest, AStrictLimitRefusesWhatDoesNotFit )
+{
+    Options options             = evictionOptions( 16 );
+    options.strictPhysicalLimit = true;
+    createLoader( options );
+    const std::vector<uint32_t> pages     = loadSixteenTiles();
+    const uint32_t              otherPage = createOnePageTexture( 0xBB );
+
+    std::vector<uint32_t> everything = resourceIds( pages );
+    everything.push_back( pageResourceId( otherPage ) );
+    for( uint32_t pass = 0; pass < 3; ++pass )
+        requestResources( everything );
+    EXPECT_FALSE( isResident( otherPage ) );
+    EXPECT_EQ( residentCount( pages ), 16u );
+    Statistics stats = loader_->getStatistics();
+    EXPECT_EQ( stats.numDeniedRequests, 3u );
+    EXPECT_TRUE( stats.budgetExhausted );
+    EXPECT_EQ( stats.peakResidentTileBytes, 16 * pageBytes );
+
+    // A launch that reads less leaves tiles to evict.
+    requestResources( { pageResourceId( otherPage ) } );
+    EXPECT_FALSE( loader_->getStatistics().budgetExhausted );
+    requestResources( { pageResourceId( otherPage ) } );
+    EXPECT_TRUE( isResident( otherPage ) );
+    EXPECT_EQ( residentCount( pages ), 15u );
+    EXPECT_EQ( loader_->getStatistics().peakResidentTileBytes, 16 * pageBytes );
 }
 
 TEST_F( VmmEvictionTest, MipTailIsEvictedLikeATile )
 {
-    createLoader( evictionOptions() );
+    createLoader( evictionOptions( 1 ) );
     const DemandTexture&    texture = loader_->createTexture( std::make_shared<TestImage>( 1024, 1024, 11, true, 0xAA ), TextureDescriptor{} );
     const DeviceTextureInfo info    = loadTextureInfo( texture );
     ASSERT_NE( info.mipTailPage, INVALID_PAGE );
+    ASSERT_GT( info.mipTailFirstLevel(), 0u );
     requestResources( { pageResourceId( info.mipTailPage ) } );
     ASSERT_TRUE( isResident( info.mipTailPage ) );
 
-    agePages( { info.mipTailPage } );
+    const uint32_t tile = tilePageId( info, 0, 0, 0 );
+    requestResources( { pageResourceId( tile ) } );
+    requestResources( { pageResourceId( tile ) } );
+    EXPECT_TRUE( isResident( tile ) );
     EXPECT_FALSE( isResident( info.mipTailPage ) );
     // The texture's metadata is never evicted.
     EXPECT_TRUE( isResourceResident( textureInfoResourceId( texture.getId() ) ) );
@@ -167,72 +244,69 @@ TEST_F( VmmEvictionTest, MipTailIsEvictedLikeATile )
 
 TEST_F( VmmEvictionTest, SharedWhiteBlackPageSurvivesTheEvictionOfItsTiles )
 {
-    createLoader( evictionOptions( true ) );
-    const DemandTexture&        texture = loader_->createTexture( std::make_shared<TestImage>( 1024, 1024, 1, true, 255 ), TextureDescriptor{} );
-    const DeviceTextureInfo     info    = loadTextureInfo( texture );
-    const std::vector<uint32_t> pages   = loadLevel0( info );
+    createLoader( evictionOptions( 2, true ) );
+    const std::vector<uint32_t> white = loadSixteenTiles( 255 );
     ASSERT_EQ( impl_->physicalPageCount(), 1u );
     ASSERT_EQ( impl_->whiteBlackTileCount(), 1u );
-    const size_t transferred = loader_->getStatistics().bytesTransferredToDevice;
-    EXPECT_EQ( transferred, pageBytes );
+    const uint32_t greyPage = createOnePageTexture( 128 );
+    requestResources( { pageResourceId( greyPage ) } );
+    ASSERT_TRUE( isResident( greyPage ) );
+    ASSERT_EQ( impl_->physicalPageCount(), 2u );
 
-    agePages( pages );
-    EXPECT_TRUE( allNonResident( pages ) );
-
-    // Mapping another texture's tile unmaps the aliases; the retained shared page stays allocated.
-    const DemandTexture&        grey      = loader_->createTexture( std::make_shared<TestImage>( 256, 256, 1, true, 128 ), TextureDescriptor{} );
-    const std::vector<uint32_t> greyPages = loadLevel0( loadTextureInfo( grey ) );
-    EXPECT_EQ( loader_->getStatistics().numEvictions, 16u );
-    EXPECT_EQ( impl_->physicalPageCount(), 2u );
+    // A third page needs room. Evicting a white tile frees none, as the tiles share one retained page.
+    const uint32_t otherPage = createOnePageTexture( 0x55 );
+    requestUntilResident( { pageResourceId( otherPage ) }, 40 );
+    EXPECT_TRUE( isResident( otherPage ) );
+    EXPECT_EQ( pageValue( otherPage ), 0x55 );
+    EXPECT_FALSE( isResident( greyPage ) );
     EXPECT_EQ( impl_->whiteBlackTileCount(), 1u );
 
-    // The white tiles join it again without another transfer.
-    EXPECT_EQ( loadLevel0( info ), pages );
-    EXPECT_EQ( impl_->physicalPageCount(), 2u );
-    EXPECT_EQ( impl_->whiteBlackTileCount(), 1u );
-    EXPECT_EQ( loader_->getStatistics().bytesTransferredToDevice, transferred + pageBytes );  // the grey tile
-    for( uint32_t pageId : pages )
+    // The white tiles join their page again.
+    requestUntilResident( resourceIds( white ), 40 );
+    for( uint32_t pageId : white )
     {
         EXPECT_TRUE( isResident( pageId ) ) << "page " << pageId;
         EXPECT_EQ( pageValue( pageId ), 255 ) << "page " << pageId;
     }
-    EXPECT_EQ( pageValue( greyPages[0] ), 128 );
+    EXPECT_EQ( impl_->whiteBlackTileCount(), 1u );
 }
 
-TEST_F( VmmEvictionTest, NoCandidatesMeansNoEviction )
+TEST_F( VmmEvictionTest, WithoutEvictionTheBudgetIsExceeded )
 {
-    Options options         = evictionOptions();
+    Options options         = evictionOptions( 16 );
     options.maxEvictedPages = 0;
     createLoader( options );
     EXPECT_EQ( context_.lru.ptr, nullptr );
     EXPECT_EQ( context_.evictionCandidates.len, 0u );
     EXPECT_FALSE( context_.requestIfResident );
 
-    const DemandTexture&        texture = loader_->createTexture( std::make_shared<TestImage>( 1024, 1024, 1, true, 0xAA ), TextureDescriptor{} );
-    const std::vector<uint32_t> pages   = loadLevel0( loadTextureInfo( texture ) );
+    const std::vector<uint32_t> pages     = loadSixteenTiles();
+    const uint32_t              otherPage = createOnePageTexture( 0xBB );
+    requestResources( { pageResourceId( otherPage ) } );
+    EXPECT_TRUE( isResident( otherPage ) );
     for( uint32_t pass = 0; pass < 8; ++pass )
         runPass();
-    for( uint32_t pageId : pages )
-        EXPECT_TRUE( isResident( pageId ) ) << "page " << pageId;
-    EXPECT_EQ( loader_->getStatistics().numEvictions, 0u );
+    EXPECT_EQ( residentCount( pages ), 16u );
+    const Statistics stats = loader_->getStatistics();
+    EXPECT_EQ( stats.numEvictions, 0u );
+    EXPECT_EQ( stats.residentTileBytes, 17 * pageBytes );
 }
 
-TEST_F( VmmEvictionTest, EvictionsAreCountedInTheStatistics )
+TEST_F( VmmEvictionTest, ATileThatCannotBeReadIsResidentAndReadsAsZero )
 {
-    createLoader( evictionOptions() );
-    const DemandTexture&        texture = loader_->createTexture( std::make_shared<TestImage>( 1024, 1024, 1, true, 0xAA ), TextureDescriptor{} );
+    createLoader( defaultOptions() );
+    const DemandTexture&        texture = loader_->createTexture( std::make_shared<UnreadableImage>( 1024, 1024, 1, true, 0xAA ), TextureDescriptor{} );
     const std::vector<uint32_t> pages   = loadLevel0( loadTextureInfo( texture ) );
-    const size_t                contextBytes = loader_->getStatistics().deviceMemoryUsed - 16 * pageBytes;
-    EXPECT_EQ( loader_->getStatistics().deviceMemoryUsed,
-               contextBytes + 16 * pageBytes );
+    ASSERT_EQ( pages.size(), 16u );
+    for( uint32_t pageId : pages )
+    {
+        EXPECT_TRUE( isResident( pageId ) ) << "page " << pageId;
+        EXPECT_EQ( pageValue( pageId ), 0 ) << "page " << pageId;
+    }
+    EXPECT_EQ( loader_->getStatistics().numFailedReads, 16u );
 
-    agePages( pages );
-    loadLevel0( loadTextureInfo( loader_->createTexture( std::make_shared<TestImage>( 256, 256, 1, true, 0xBB ), TextureDescriptor{} ) ) );
-
-    const Statistics stats = loader_->getStatistics();
-    EXPECT_EQ( stats.numEvictions, 16u );
-    EXPECT_EQ( stats.deviceMemoryUsed, contextBytes + pageBytes );
-    EXPECT_EQ( stats.bytesTransferredToDevice, 17 * pageBytes );
+    // Resident tiles are not requested again.
+    EXPECT_EQ( requestResources( resourceIds( pages ) ).numTasksTotal(), 0 );
 }
 
 }  // namespace hip_demand::vmm::test
