@@ -179,9 +179,14 @@ class DemandTextureLoaderImpl : public DemandTextureLoader, NonCopyble
     // Runs a read of an image source. One that fails or throws is counted, and logged for the first of its texture.
     template <class Read>
     bool readOrReport( uint32_t textureId, const char* what, Read&& read );
-    void          processTextureInfo( hipStream_t stream, uint32_t textureId );
+    // Claims a resource for loading; false when it is resident or being loaded. endLoading() gives it back.
+    bool          beginLoading( uint32_t resourceId );
+    void          endLoading( uint32_t resourceId, bool resident );
+    void          preloadTextures( hipStream_t stream, uint32_t firstTexture, uint32_t endTexture );
+    void          publishResources( hipStream_t stream, const HostSpan<uint32_t>& resourceIds, uint32_t count );
+    void          processTextureInfo( hipStream_t stream, DemandTextureImpl& texture );
     bool          processTile( hipStream_t stream, const Resource::Tile& tile );
-    void          processMipTail( hipStream_t stream, const Resource::MipTail& mipTail );
+    void          processMipTail( hipStream_t stream, const DemandTextureImpl& texture, uint32_t pageId );
     void          processCascade( hipStream_t stream, const Resource::Cascade& cascade );
     void          assignLevelPages( DemandTextureImpl& texture, uint32_t firstLevel, uint32_t endLevel );
     void          addTransferredBytes( size_t bytes );
@@ -191,6 +196,8 @@ class DemandTextureLoaderImpl : public DemandTextureLoader, NonCopyble
     PageSystem         pageSystem_;
 
     std::vector<std::unique_ptr<DemandTextureImpl>> textures_{};
+    // Textures before this one have been through preloadTextures() (Options::preloadTextures).
+    uint32_t preloadedTextureCount_ = 0;
 
     // Guards the layout of textures over the virtual pages: pageTable_.textureTiles.nextAvailablePage (the page
     // allocator), pageRanges_, and DemandTextureImpl::info of every texture, which encodes that layout for the device.
@@ -232,7 +239,9 @@ class DemandTextureLoaderImpl : public DemandTextureLoader, NonCopyble
         uint32_t                    pendingUnmapCount = 0;  // Cleared victims awaiting the next host copy.
     } eviction_{};
 
-    // Tiles the workers of the current pass may still map; see planEvictions().
+    // Pages that may still be mapped: by the workers of the current pass (see planEvictions()), and by
+    // preloadTextures() between passes, which finds here what the last pass left of the budget, or the whole budget
+    // before the first pass.
     std::atomic<int64_t> mapAllowance_{ std::numeric_limits<int64_t>::max() };
 
     // Resources loaded by the workers since the last device update. The loader expects one stream and a completed ticket

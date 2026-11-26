@@ -46,6 +46,7 @@ add_executable(texture_loader_tests
     VmmCascadeTests.cpp
     VmmTextureTests.cpp
     VmmRequestTests.cpp
+    VmmPreloadTests.cpp
     VmmSamplerTests.cpp
 )
 

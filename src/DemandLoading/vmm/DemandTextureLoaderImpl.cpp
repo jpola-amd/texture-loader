@@ -166,6 +166,9 @@ DemandTextureLoaderImpl::DemandTextureLoaderImpl( const Options& options )
     , uploadPool_( requestProcessor_.threadCount() * 3 )
     , bits_( resourceTable_.count() )
 {
+    // Before the first pass has planned, preloadTextures() may map up to the budget.
+    if( options_.maxPhysicalPages != ~0u )
+        mapAllowance_.store( options_.maxPhysicalPages );
 }
 
 void DemandTextureLoaderImpl::init()
@@ -307,6 +310,14 @@ void DemandTextureLoaderImpl::setUdimFields( DeviceTextureInfo& info, const Dema
 void DemandTextureLoaderImpl::launchPrepare( hipStream_t stream, DeviceContext& deviceContext )
 {
     std::lock_guard lock( mutex_ );
+
+    const uint32_t textureCount = static_cast<uint32_t>( textures_.size() );
+    if( options_.preloadTextures && preloadedTextureCount_ < textureCount )
+    {
+        const uint32_t firstTexture = preloadedTextureCount_;
+        preloadedTextureCount_      = textureCount;
+        preloadTextures( stream, firstTexture, textureCount );
+    }
 
     deviceContext              = deviceContext_;
     deviceContext.textureInfos = deviceContext.textureInfos.subspan( 0, textures_.size() );
@@ -477,15 +488,97 @@ void DemandTextureLoaderImpl::clearEvictedPages( hipStream_t stream )
     eviction_.clearCount        = 0;
 }
 
+bool DemandTextureLoaderImpl::beginLoading( uint32_t resourceId )
+{
+    std::lock_guard lock( bits_.mutex );
+    if( bits_.residence.test( resourceId ) || bits_.loading.test( resourceId ) )
+        return false;
+
+    bits_.loading.set( resourceId, true );
+    return true;
+}
+
+void DemandTextureLoaderImpl::endLoading( uint32_t resourceId, bool resident )
+{
+    std::lock_guard lock( bits_.mutex );
+    bits_.residence.set( resourceId, resident );
+    bits_.loading.set( resourceId, false );
+}
+
+// Loads the metadata and the mip tail of the textures created since the last launchPrepare(), which calls this with
+// mutex_ held, and publishes them to the device, so that the next launch finds them resident.
+void DemandTextureLoaderImpl::preloadTextures( hipStream_t stream, uint32_t firstTexture, uint32_t endTexture )
+{
+    std::vector<uint32_t> loaded;
+    loaded.reserve( 2 * static_cast<size_t>( endTexture - firstTexture ) );
+
+    // A resource that fails here is not resident: a launch that samples its texture requests it, and a worker tries again.
+    const auto load = [&]( uint32_t resourceId, auto&& process ) {
+        if( !beginLoading( resourceId ) )
+            return false;
+
+        bool resident = false;
+        try
+        {
+            resident = process();
+        }
+        catch( const std::exception& e )
+        {
+            reportOnce( resourceId, e.what() );
+        }
+        endLoading( resourceId, resident );
+        if( resident )
+            loaded.push_back( resourceId );
+        return resident;
+    };
+
+    for( uint32_t textureId = firstTexture; textureId < endTexture; ++textureId )
+    {
+        DemandTextureImpl& texture = *textures_[textureId];
+        if( !load( resourceTable_.textureInfos.getResourceId( textureId ), [&] {
+                processTextureInfo( stream, texture );
+                return true;
+            } ) )
+            continue;
+
+        // An empty UDIM cell and a texture without a level that fits in a page have no mip tail.
+        const uint32_t mipTailPage = textureInfo( texture ).mipTailPage;
+        if( mipTailPage == INVALID_PAGE )
+            continue;
+
+        load( resourceTable_.textureTiles.getResourceId( mipTailPage ), [&] {
+            // Without room in the budget the mip tail waits for a request, which can evict for it.
+            if( !acquirePage() )
+                return false;
+            try
+            {
+                processMipTail( stream, texture, mipTailPage );
+            }
+            catch( ... )
+            {
+                releasePage();
+                throw;
+            }
+            notePagesInUse();
+            return true;
+        } );
+    }
+
+    // The device's list takes maxRequests resources at a time.
+    const size_t chunkSize = deviceContext_.processedResources.len;
+    for( size_t first = 0; first < loaded.size(); first += chunkSize )
+    {
+        const uint32_t count  = static_cast<uint32_t>( std::min( chunkSize, loaded.size() - first ) );
+        auto           upload = uploadPool_.acquire<uint32_t>( chunkSize, stream );
+        std::copy_n( loaded.data() + first, count, upload.span().ptr );
+        publishResources( stream, upload.span(), count );
+    }
+}
+
 void DemandTextureLoaderImpl::processRequest( hipStream_t stream, uint32_t resourceId )
 {
-    {
-        std::lock_guard lock( bits_.mutex );
-        if( bits_.residence.test( resourceId ) || bits_.loading.test( resourceId ) )
-            return;
-
-        bits_.loading.set( resourceId, true );
-    }
+    if( !beginLoading( resourceId ) )
+        return;
 
     bool success  = false;
     bool acquired = false;
@@ -506,13 +599,13 @@ void DemandTextureLoaderImpl::processRequest( hipStream_t stream, uint32_t resou
             switch( resource.type )
             {
                 case Resource::Type::TextureId:
-                    processTextureInfo( stream, resource.textureId );
+                    processTextureInfo( stream, getTexture( resource.textureId ) );
                     break;
                 case Resource::Type::Tile:
                     mappedPage = processTile( stream, resource.tile );
                     break;
                 case Resource::Type::MipTail:
-                    processMipTail( stream, resource.mipTail );
+                    processMipTail( stream, getTexture( resource.mipTail.textureId ), resource.mipTail.pageId );
                     break;
                 case Resource::Type::Cascade:
                     processCascade( stream, resource.cascade );
@@ -540,11 +633,7 @@ void DemandTextureLoaderImpl::processRequest( hipStream_t stream, uint32_t resou
         reportOnce( resourceId, e.what() );
     }
 
-    {
-        std::lock_guard lock( bits_.mutex );
-        bits_.residence.set( resourceId, success );
-        bits_.loading.set( resourceId, false );
-    }
+    endLoading( resourceId, success );
 }
 
 DemandTextureImpl& DemandTextureLoaderImpl::getTexture( uint32_t textureId )
@@ -559,10 +648,10 @@ DeviceTextureInfo DemandTextureLoaderImpl::textureInfo( const DemandTextureImpl&
     return texture.info;
 }
 
-void DemandTextureLoaderImpl::processTextureInfo( hipStream_t stream, uint32_t textureId )
+void DemandTextureLoaderImpl::processTextureInfo( hipStream_t stream, DemandTextureImpl& texture )
 {
-    DemandTextureImpl& texture = getTexture( textureId );
-    auto               upload  = uploadPool_.acquire<DeviceTextureInfo>( 1, stream );
+    const uint32_t textureId = texture.id;
+    auto           upload    = uploadPool_.acquire<DeviceTextureInfo>( 1, stream );
 
     // An empty UDIM cell has no image and no pages: its descriptor only marks it loaded and empty, with the grid.
     if( texture.isEmpty() )
@@ -763,10 +852,9 @@ bool DemandTextureLoaderImpl::processTile( hipStream_t stream, const Resource::T
     return true;
 }
 
-void DemandTextureLoaderImpl::processMipTail( hipStream_t stream, const Resource::MipTail& mipTail )
+void DemandTextureLoaderImpl::processMipTail( hipStream_t stream, const DemandTextureImpl& texture, uint32_t pageId )
 {
-    const DemandTextureImpl& texture = getTexture( mipTail.textureId );
-    const DeviceTextureInfo  info    = textureInfo( texture );
+    const DeviceTextureInfo info = textureInfo( texture );
     assert( info.mipTailFirstLevel() < info.mipCount() );
 
     assert( info.mipTailLevelOffset( info.mipCount() ) <= pageSystem_.pageBytes() );
@@ -777,15 +865,15 @@ void DemandTextureLoaderImpl::processMipTail( hipStream_t stream, const Resource
 
     auto pageBuffer = uploadPool_.acquire<uint8_t>( pageSystem_.pageBytes(), stream );
     std::memset( pageBuffer.span().ptr, 0, pageBuffer.span().sizeInBytes() );
-    const bool read = readOrReport( mipTail.textureId, "mip tail", [&] {
+    const bool read = readOrReport( texture.id, "mip tail", [&] {
         return texture.image->readMipTail( reinterpret_cast<char*>( pageBuffer.span().ptr ), info.mipTailFirstLevel(),
                                            info.mipCount(), levelDims.data(), stream );
     } );
     if( !read )
         std::memset( pageBuffer.span().ptr, 0, pageBuffer.span().sizeInBytes() );
 
-    pageSystem_.map( mipTail.pageId );
-    memcpyHtoD( pageSystem_.page( mipTail.pageId ), pageBuffer.span(), stream );
+    pageSystem_.map( pageId );
+    memcpyHtoD( pageSystem_.page( pageId ), pageBuffer.span(), stream );
     addTransferredBytes( pageBuffer.span().sizeInBytes() );
 }
 
@@ -882,14 +970,21 @@ void DemandTextureLoaderImpl::updateProcessedResources( hipStream_t stream )
     if( processed_.count == 0 )
         return;
 
+    publishResources( stream, processed_.resources, processed_.count );
+    processed_.count = 0;
+}
+
+// Marks loaded resources resident on the device. resourceIds is pinned memory that stays as it is until the stream
+// has copied it.
+void DemandTextureLoaderImpl::publishResources( hipStream_t stream, const HostSpan<uint32_t>& resourceIds, uint32_t count )
+{
     const uint32_t resourcesPerThread = 2;
     const uint32_t blockSize          = 256;
-    const uint32_t gridSize           = ceilDiv( processed_.count, resourcesPerThread * blockSize );
-    void*          args[]             = { &deviceContext_, &processed_.count };
+    const uint32_t gridSize           = ceilDiv( count, resourcesPerThread * blockSize );
+    void*          args[]             = { &deviceContext_, &count };
 
-    memcpyHtoD( deviceContext_.processedResources, processed_.resources, processed_.count, stream );
+    memcpyHtoD( deviceContext_.processedResources, resourceIds, count, stream );
     HIP_CHECK( hipModuleLaunchKernel( kernels_.updateProcessedResources, gridSize, 1, 1, blockSize, 1, 1, 0, stream, args, nullptr ) );
-    processed_.count = 0;
 }
 
 std::unique_ptr<DemandTextureLoader> createDemandTextureLoader( const Options& options )

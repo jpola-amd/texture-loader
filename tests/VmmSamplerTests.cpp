@@ -395,6 +395,33 @@ TEST_F( VmmSamplerTest, MissingResourcesAreRequestedUntilResident )
     EXPECT_EQ( maxChannelDifference( results[0].value, make_float4( 0.0f, 0.0f, 0.0f, 0.0f ) ), 0.0f );
 }
 
+TEST_F( VmmSamplerTest, PreloadedTextureIsSampledAtTheFirstLaunch )
+{
+    Options options         = defaultOptions();
+    options.preloadTextures = true;
+    createLoader( options );
+    const auto image = std::make_shared<TestImage>( 1024, 1024, 11, TestImage::Pattern::Noise, 0, 4 );
+    NativeTexture native( *image, hipAddressModeClamp );
+    TextureDescriptor descriptor{};
+    descriptor.addressMode[0] = hipAddressModeClamp;
+    descriptor.addressMode[1] = hipAddressModeClamp;
+    const DemandTexture& texture = loader_->createTexture( image, descriptor );
+
+    // Levels 4 to 10 of 1024x1024 rgba8 are the mip tail, which is there with the metadata.
+    const std::vector<SamplePoint> farPoints = gridPoints( 8, 0.0f, 1.0f, { 4.0f, 7.0f, 10.0f }, 1024 );
+    uint32_t                       passes    = 0;
+    std::vector<SampleResult>      vmm       = sampleVmm( vmmLod_, texture.getId(), farPoints, passes );
+    EXPECT_EQ( passes, 1u );
+    expectMatch( farPoints, vmm, sampleNative( nativeLod_, native.get(), farPoints ), filterTolerance );
+    EXPECT_EQ( image->getNumTilesRead(), 0u );
+
+    // The first launch that reads finer levels asks for their tiles, without a pass for the metadata before it.
+    const std::vector<SamplePoint> nearPoints = gridPoints( 8, 0.0f, 1.0f, { 0.0f, 2.0f }, 1024 );
+    vmm                                       = sampleVmm( vmmLod_, texture.getId(), nearPoints, passes );
+    EXPECT_EQ( passes, 2u );
+    expectMatch( nearPoints, vmm, sampleNative( nativeLod_, native.get(), nearPoints ), filterTolerance );
+}
+
 TEST_F( VmmSamplerTest, CascadeTextureIsExtendedBySampling )
 {
     Options options        = defaultOptions();
