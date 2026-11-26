@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <tuple>
 #include <unordered_set>
@@ -28,10 +29,23 @@ namespace hip_demand {
 
 using internal::TextureMetadata;
 using internal::RequestStats;
-using internal::calculateMipLevels;
 using internal::HipOperation;
 
 namespace {
+// PNM stores 16-bit samples most significant byte first. stb_image 2.30 returns them as they are
+// in the file, so on a little-endian host every sample has its bytes swapped.
+bool isPnmFile(const std::string& filename) {
+    std::ifstream file(filename, std::ios::binary);
+    char magic[2] = {};
+    return file.read(magic, 2) && magic[0] == 'P' && (magic[1] == '5' || magic[1] == '6');
+}
+
+void swapSampleBytes16(void* samples, size_t count) {
+    auto* bytes = static_cast<unsigned char*>(samples);
+    for (size_t i = 0; i < count; ++i)
+        std::swap(bytes[2 * i], bytes[2 * i + 1]);
+}
+
 bool validDescriptor(const TextureDesc& desc) {
     const auto validAddress = [](hipTextureAddressMode mode) {
         return mode == hipAddressModeWrap || mode == hipAddressModeClamp ||
@@ -986,6 +1000,8 @@ bool DemandTextureLoader::Impl::loadTexture(uint32_t texId) {
                     sourceInfo.format = HIP_AD_FORMAT_FLOAT;
                 } else if (stbi_is_16_bit(filename.c_str())) {
                     pixels.reset(stbi_load_16(filename.c_str(), &width, &height, &channels, 4));
+                    if (pixels && isPnmFile(filename))
+                        swapSampleBytes16(pixels.get(), static_cast<size_t>(width) * height * 4);
                     sourceInfo.format = HIP_AD_FORMAT_UNSIGNED_INT16;
                 } else {
                     pixels.reset(stbi_load(filename.c_str(), &width, &height, &channels, 4));

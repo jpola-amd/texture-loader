@@ -100,6 +100,71 @@ inline float halfToFloat(uint16_t value) {
     return output;
 }
 
+/// Converts a float to IEEE half with round-to-nearest-even; out-of-range values become infinities.
+inline uint16_t floatToHalf( float value )
+{
+    uint32_t bits;
+    std::memcpy( &bits, &value, sizeof( bits ) );
+    const uint32_t sign     = ( bits >> 16 ) & 0x8000u;
+    const uint32_t exponent = ( bits >> 23 ) & 0xffu;
+    const uint32_t fraction = bits & 0x7fffffu;
+
+    if( exponent == 0xffu )  // Infinity or NaN.
+        return static_cast<uint16_t>( sign | 0x7c00u | ( fraction ? 0x200u : 0u ) );
+
+    const int halfExponent = static_cast<int>( exponent ) - 127 + 15;
+    if( halfExponent >= 0x1f )
+        return static_cast<uint16_t>( sign | 0x7c00u );
+
+    if( halfExponent <= 0 )  // Subnormal or zero.
+    {
+        if( halfExponent < -10 )
+            return static_cast<uint16_t>( sign );
+        const uint32_t mantissa  = fraction | 0x800000u;
+        const uint32_t shift     = static_cast<uint32_t>( 14 - halfExponent );
+        uint32_t       half      = mantissa >> shift;
+        const uint32_t remainder = mantissa & ( ( 1u << shift ) - 1 );
+        const uint32_t halfway   = 1u << ( shift - 1 );
+        if( remainder > halfway || ( remainder == halfway && ( half & 1u ) ) )
+            ++half;
+        return static_cast<uint16_t>( sign | half );
+    }
+
+    uint32_t       half      = sign | ( static_cast<uint32_t>( halfExponent ) << 10 ) | ( fraction >> 13 );
+    const uint32_t remainder = fraction & 0x1fffu;
+    if( remainder > 0x1000u || ( remainder == 0x1000u && ( half & 1u ) ) )
+        ++half;  // A carry rolls into the exponent correctly.
+    return static_cast<uint16_t>( half );
+}
+
+/// Copies the tile out of a level held in memory. Pixels outside the level are zero. Returns false when the tile
+/// starts outside the level.
+inline bool copyTileFromLevel( char*        dest,
+                               const Tile&  tile,
+                               const char*  level,
+                               uint32_t levelWidth,
+                               uint32_t levelHeight,
+                               size_t       bytesPerPixel )
+{
+    const uint32_t x0 = tile.x * tile.width;
+    const uint32_t y0 = tile.y * tile.height;
+    if( x0 >= levelWidth || y0 >= levelHeight )
+        return false;
+
+    const uint32_t copyWidth  = std::min( tile.width, levelWidth - x0 );
+    const uint32_t copyHeight = std::min( tile.height, levelHeight - y0 );
+    const size_t       rowPitch   = static_cast<size_t>( tile.width ) * bytesPerPixel;
+    const size_t       levelPitch = static_cast<size_t>( levelWidth ) * bytesPerPixel;
+
+    if( copyWidth < tile.width || copyHeight < tile.height )
+        std::memset( dest, 0, static_cast<size_t>( tile.height ) * rowPitch );
+
+    const char* source = level + static_cast<size_t>( y0 ) * levelPitch + static_cast<size_t>( x0 ) * bytesPerPixel;
+    for( uint32_t row = 0; row < copyHeight; ++row )
+        std::memcpy( dest + row * rowPitch, source + row * levelPitch, static_cast<size_t>( copyWidth ) * bytesPerPixel );
+    return true;
+}
+
 template<class T> inline float normalizedChannel(const unsigned char* source) {
     const double value = static_cast<double>(readChannel<T>(source));
     const double maximum = static_cast<double>(std::numeric_limits<T>::max());

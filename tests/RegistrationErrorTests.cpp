@@ -43,6 +43,7 @@ public:
         std::memcpy(dest, pixels.data(), pixels.size());
         return true;
     }
+    bool readTile(char*, unsigned int, const Tile&, hipStream_t) override { return false; }
     bool readBaseColor(float4&) override { return false; }
     unsigned long long getNumBytesRead() const override { return reads * pixels.size(); }
     double getTotalReadTime() const override { return 0; }

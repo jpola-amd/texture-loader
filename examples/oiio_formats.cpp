@@ -24,7 +24,7 @@ void testImageFormat(const std::string& filename) {
     
 #ifdef USE_OIIO
     try {
-        auto imgSrc = hip_demand::createImageSource(filename);
+        auto imgSrc = std::make_unique<hip_demand::OIIOReader>( filename );
         if (!imgSrc) {
             std::cout << "ERROR: Failed to create ImageSource" << std::endl;
             return;
@@ -221,7 +221,6 @@ int main(int argc, char** argv) {
     std::cout << "  [+] BMP       - Windows Bitmap" << std::endl;
     std::cout << "  [+] DPX       - Digital Picture Exchange" << std::endl;
     std::cout << "  [+] And 100+ more via OIIO plugins" << std::endl;
-    std::cout << "\nAll formats are automatically converted to UINT8 RGBA for GPU upload." << std::endl;
     printSeparator();
     
     return 0;

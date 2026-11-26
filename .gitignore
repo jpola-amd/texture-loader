@@ -23,6 +23,7 @@ cmake_install.cmake
 !CMakeLists.txt
 !cmake/FindHIP.cmake
 !cmake/VcpkgBootstrap.cmake
+!cmake/Mempulse.cmake
 !tests/VcpkgBootstrapTests.cmake
 external/vcpkg/
 vcpkg_installed/
@@ -41,14 +42,13 @@ cmake_configure_*.cmd
 *.so
 *.a
 *.lib
+!external/mempulse/**
 
 # IDE
 .vscode/
 .idea/
 
 # Generated images
-*.png
-*.jpg
 *.bmp
 
 # OS

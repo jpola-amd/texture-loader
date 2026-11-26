@@ -98,17 +98,28 @@ OpenImageIO-based implementation with production-grade features:
 
 **Features**:
 - Automatic format detection for 100+ image formats
-- Thread-safe with internal mutex protection
-- Caches all mip levels in memory for fast access
-- Automatic UINT8 conversion from any source format
-- Box filter mipmap generation
-- Statistics tracking (bytes read, read time)
+- Thread-safe: tiles of one file are read concurrently without locking
+- Reads tiles straight from tiled files (tiled TIFF/EXR, `.tx`), nothing cached in memory
+- Keeps the file's pixel format and channel count
+- Reports the mip levels authored in the file
+- Statistics tracking (tiles read, bytes read, read time)
 
 **Supported Formats**:
 - HDR formats: EXR, HDR (Radiance)
 - Standard formats: PNG, JPEG, TIFF, BMP, TGA
 - Professional formats: DPX, Cineon, SGI, etc.
 - And 100+ more via OIIO plugins
+
+### 4. Adapters
+
+**Files**: `include/ImageSource/WrappedImageSource.h`, `TiledImageSource.h`, `MipMapImageSource.h`
+
+- `WrappedImageSource`: delegates every call to another image source; base for the adapters
+- `TiledImageSource`: serves tiles of a non-tiled image from a copy of the level in memory
+- `MipMapImageSource`: gives a single-level image a box-filtered mip chain built in memory
+
+`createTiledImageSource()` and `createMipMapImageSource()` return the image itself when it is already tiled or
+mipmapped, so the usual chain is `OIIOReader → createMipMapImageSource → createTiledImageSource`.
 
 **Usage**:
 
@@ -224,10 +235,9 @@ cmake --build build -j$(nproc)
 ### Memory Usage
 
 **OIIOReader**:
-- Caches all mip levels in RAM
-- Higher memory usage for large textures
-- Faster repeated access (no disk I/O)
-- ~1.33× base texture size (with mipmaps)
+- Reads tiles on demand, no caching
+- Minimal memory overhead: one tile per read
+- Repeated reads go to disk again
 
 **stb_image**:
 - Load on demand, no caching
@@ -238,11 +248,11 @@ cmake --build build -j$(nproc)
 ### Load Time
 
 **First Load**:
-- OIIO: Slower (loads all mips, format conversion)
-- stb_image: Faster (single level, simple formats)
+- OIIO: Fast (opens the file and reads the header only)
+- stb_image: Slower (decodes the whole image)
 
 **Subsequent Access**:
-- OIIO: Instant (cached in memory)
+- OIIO: One tile per read; tiled files seek straight to it, scanline files decode the rows before it
 - stb_image: Same as first load (no caching)
 
 ## Extending ImageSource

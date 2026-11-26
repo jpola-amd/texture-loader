@@ -40,6 +40,35 @@ public:
         }
         return true;
     }
+    bool readTile(char* dest, unsigned int level, const Tile& tile, hipStream_t) override {
+        ++reads;
+        readLevels.push_back(level);
+        destination = dest;
+        if (failRead) return false;
+        const std::vector<unsigned char>* source = &pixels;
+        if (!mipPixels.empty()) {
+            if (level >= mipPixels.size()) return false;
+            source = &mipPixels[level];
+        } else if (level != 0) {
+            return false;
+        }
+        const size_t levelWidth = std::max(1u, info.width >> level);
+        const size_t levelHeight = std::max(1u, info.height >> level);
+        const size_t firstX = static_cast<size_t>(tile.x) * tile.width;
+        const size_t firstY = static_cast<size_t>(tile.y) * tile.height;
+        if (firstX >= levelWidth || firstY >= levelHeight) return false;
+        const size_t texelBytes = getBytesPerChannel(info.format) * info.numChannels;
+        const size_t copyWidth = std::min<size_t>(tile.width, levelWidth - firstX);
+        const size_t copyHeight = std::min<size_t>(tile.height, levelHeight - firstY);
+        const size_t tileRowBytes = tile.width * texelBytes;
+        // Edge tiles are zero padded.
+        std::memset(dest, 0, tile.height * tileRowBytes);
+        for (size_t y = 0; y < copyHeight; ++y)
+            std::memcpy(dest + y * tileRowBytes,
+                        source->data() + ((firstY + y) * levelWidth + firstX) * texelBytes,
+                        copyWidth * texelBytes);
+        return true;
+    }
     bool readBaseColor(float4&) override { ++baseColorReads; return false; }
     unsigned long long getNumBytesRead() const override { return reads * pixels.size(); }
     double getTotalReadTime() const override { return 0.0; }
