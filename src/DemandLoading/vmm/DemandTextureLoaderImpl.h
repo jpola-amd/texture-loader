@@ -7,10 +7,13 @@
 #include "PinnedUploadPool.h"
 #include "RequestProcessor.h"
 #include <DemandLoading/VmmDemandTextureLoader.h>
+#include <atomic>
 #include <cassert>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -168,9 +171,16 @@ class DemandTextureLoaderImpl : public DemandTextureLoader, NonCopyble
     void          setUdimFields( DeviceTextureInfo& info, const DemandTextureImpl::UdimGrid& udim ) const;
     void          clearEvictedPages( hipStream_t stream );
     void          releaseEvictedPages( uint32_t reusablePageCount );
-    void          updateLruThreshold();
+    uint32_t      planEvictions( uint32_t requestCount, uint32_t evictableCount );
+    bool          acquirePage();
+    void          releasePage();
+    void          notePagesInUse();
+    void          reportOnce( uint32_t resourceId, const char* message );
+    // Runs a read of an image source. One that fails or throws is counted, and logged for the first of its texture.
+    template <class Read>
+    bool readOrReport( uint32_t textureId, const char* what, Read&& read );
     void          processTextureInfo( hipStream_t stream, uint32_t textureId );
-    void          processTile( hipStream_t stream, const Resource::Tile& tile );
+    bool          processTile( hipStream_t stream, const Resource::Tile& tile );
     void          processMipTail( hipStream_t stream, const Resource::MipTail& mipTail );
     void          processCascade( hipStream_t stream, const Resource::Cascade& cascade );
     void          assignLevelPages( DemandTextureImpl& texture, uint32_t firstLevel, uint32_t endLevel );
@@ -209,16 +219,21 @@ class DemandTextureLoaderImpl : public DemandTextureLoader, NonCopyble
 
     ResourceBits bits_;
 
-    // Eviction is pipelined over passes: candidates collected by one pass are cleared on the device at the start of the
-    // next one (clearEvictedPages) and unmapped on the host after that pass's requests are read back.
+    // Eviction serves the memory budget (Options::maxPhysicalPages) and is pipelined over passes. A pass that cannot
+    // map all the tiles requested picks victims among the tiles its launch did not read. Their residence bits are
+    // cleared on the device before the next launch (clearEvictedPages), and they are unmapped on the host after that
+    // launch's requests are read back, when no kernel that saw them resident can still run.
     struct
     {
         mutable std::mutex          mutex;
-        HostSpan<EvictionCandidate> candidates;
-        uint32_t                    clearCount        = 0;  // Device candidates awaiting residence-bit clearing.
-        uint32_t                    pendingUnmapCount = 0;  // Cleared candidates awaiting the next host copy.
-        uint32_t                    lruThreshold      = lruThresholdMin;
+        HostSpan<EvictionCandidate> candidates;             // The device's list of the last pass.
+        HostSpan<EvictionCandidate> victims;                // The tiles picked from it.
+        uint32_t                    clearCount        = 0;  // Victims awaiting residence-bit clearing.
+        uint32_t                    pendingUnmapCount = 0;  // Cleared victims awaiting the next host copy.
     } eviction_{};
+
+    // Tiles the workers of the current pass may still map; see planEvictions().
+    std::atomic<int64_t> mapAllowance_{ std::numeric_limits<int64_t>::max() };
 
     // Resources loaded by the workers since the last device update. The loader expects one stream and a completed ticket
     // before the next processRequests(), so a pass never adds more than maxRequests resources, and the copy from this
@@ -242,6 +257,13 @@ class DemandTextureLoaderImpl : public DemandTextureLoader, NonCopyble
     {
         mutable std::mutex mutex;
         size_t             bytesTransferredToDevice = 0;
+        size_t             deniedRequests           = 0;
+        size_t             failedReads              = 0;
+        uint32_t           peakPagesInUse           = 0;
+        bool               budgetExhausted          = false;
+        // Resources and textures whose failure was reported already.
+        std::unordered_set<uint32_t> reportedResources;
+        std::unordered_set<uint32_t> reportedTextures;
     } stats_{};
 };
 

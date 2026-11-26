@@ -178,6 +178,31 @@ uint32_t PageSystem::unmappedPageCount() const
     return virtual_.unmappedCount;
 }
 
+uint32_t PageSystem::pagesInUse() const
+{
+    std::lock_guard<std::mutex> lock( mutex_ );
+    return physical_.allocatedCount - static_cast<uint32_t>( physical_.reusablePages.size() );
+}
+
+uint32_t PageSystem::pagesInUseAfterEvictions() const
+{
+    std::lock_guard<std::mutex> lock( mutex_ );
+
+    // A physical page is freed when every virtual page mapped to it is evicted and it is not retained.
+    std::unordered_map<uint32_t, uint32_t> evictedUses;
+    std::unordered_map<uint32_t, bool>     seenPages;
+    uint32_t                               freedPages = 0;
+    for( const uint32_t virtualPageId : virtual_.pendingEvictedPages )
+    {
+        const auto mapping = virtualIdToPhysicalId_.find( virtualPageId );
+        if( mapping == virtualIdToPhysicalId_.end() || !seenPages.emplace( virtualPageId, true ).second )
+            continue;
+        if( ++evictedUses[mapping->second] == physical_.pages.at( mapping->second ).useCount )
+            freedPages++;
+    }
+    return physical_.allocatedCount - static_cast<uint32_t>( physical_.reusablePages.size() ) - freedPages;
+}
+
 // TODO_BS: remove this workaround (and its calls) once ROCm/rocm-systems#13106 is fixed and hipMemUnmap() invalidates the GPU TLB itself.
 void PageSystem::invalidateDeviceTlb()
 {
