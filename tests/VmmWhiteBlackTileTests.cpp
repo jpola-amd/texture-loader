@@ -39,7 +39,9 @@ std::vector<uint8_t> pageOf( const std::vector<uint8_t>& texel )
 // The key of a page of the texel, taken as one row, or "" when it is not a white or black tile.
 std::string keyOfPage( const std::vector<uint8_t>& page, hipArray_Format format, uint32_t numChannels )
 {
-    const uint32_t texels = static_cast<uint32_t>( page.size() / ( getBytesPerChannel( format ) * numChannels ) );
+    // A format or channel count the key function must reject has no texel size: the page is passed as bytes.
+    const uint32_t bytesPerTexel = getBytesPerChannel( format ) * numChannels;
+    const uint32_t texels        = static_cast<uint32_t>( page.size() / ( bytesPerTexel ? bytesPerTexel : 1 ) );
     std::string    key;
     return whiteBlackTileKey( page.data(), texels, texels, 1, format, numChannels, key ) ? key : "";
 }
